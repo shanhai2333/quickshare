@@ -589,6 +589,19 @@ git push origin v1.0.0
 推完 tag 之后两个发布工作流会并行跑：一个出二进制，一个出镜像。
 镜像会打三个标签：`1.0.0`、`1.0`、`latest`。
 
+> **工作流文件是按「触发它的那个 ref」取的。** tag 触发的运行，用的是**那个 tag 指向的提交**里的
+> `release.yml`（不是 `main` 上最新的）。所以修完工作流之后，**光把修复推到 `main` 不会有任何
+> 变化**，**在 Actions 页面点 "Re-run" 也还是跑旧的**——这一点最反直觉。要重发得把 tag 挪过去：
+>
+> ```bash
+> git push origin main      # 先让新提交存在
+> git tag -f v1.0.0         # 把 tag 挪到它上面
+> git push --force origin v1.0.0
+> ```
+>
+> 另外，如果上一次失败前已经建出了 Release，重新触发会报 `release already exists`，
+> 先去 Releases 页面把它删掉。
+
 ### Docker Hub 的密钥
 
 `docker.yml` 的发布 job 需要仓库里有两个 Secret
