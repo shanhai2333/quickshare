@@ -406,6 +406,22 @@ Linux / macOS **没有**这个功能，而且是刻意不做：NAS 上的实例�
 
 ### 方式一：Docker（推荐）
 
+**用发布好的镜像**（多架构：amd64 / arm64 / armv7，会自动选对）：
+
+```bash
+mkdir -p ./data
+sudo chown -R 1000:1000 ./data
+
+docker run -d --name quickshare \
+  -p 8080:8080 \
+  -v ./data:/data \
+  --user 1000:1000 \
+  --restart unless-stopped \
+  <你的用户名>/quickshare:latest
+```
+
+**或者用仓库里的 compose 现场构建**：
+
 ```bash
 mkdir -p ./data
 
@@ -415,6 +431,11 @@ sudo chown -R 1000:1000 ./data
 
 docker compose up -d --build
 ```
+
+> 两种方式的区别只在**镜像从哪来**：发布的镜像是构建时注入了版本号的（设置面板「关于」里能
+> 看到版本、也能检查更新），`--build` 现场构建的默认是 `dev`，**不做更新检查**。
+> 想让本地构建也带上版本号，用 `make image VERSION=1.0.0` 或直接给 `docker build` 传
+> `--build-arg VERSION=1.0.0`（见「自动发布与版本」一节）。
 
 > **OpenWrt 用户**：图省事可以跳过 `chown`，直接在 `docker-compose.yml` 里
 > `user: "0:0"` 用 root 跑。另外数据目录别放 `/tmp` 或 `/` 下面，
@@ -476,6 +497,12 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dis
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/quickshare-linux-arm64 .
 CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o dist/quickshare-linux-armv7 .
 ```
+
+> **这几条编出来的是 `dev` 版**：不带 `-ldflags -X` 注入版本号，设置面板的「关于」会显示
+> "这个构建没有配置更新检查"，`/api/config` 报的版本也是 `dev`。这是**刻意的**——自己编的
+> 二进制不该假装成某个正式版本，也不该去问远端有没有新版本。
+> 想要带版本号的构建就用上面的 `make dist`（它从 git tag 推导），或者直接从
+> [Releases](../../releases) 下已经注好版本号的产物。
 
 > **别搞混产物**：
 >

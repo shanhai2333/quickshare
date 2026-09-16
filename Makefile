@@ -39,7 +39,7 @@ ifeq ($(GOOS_NOW),windows)
 EXE := .exe
 endif
 
-.PHONY: build run dist windows linux-amd64 linux-arm64 linux-arm version tidy clean
+.PHONY: build run dist windows linux-amd64 linux-arm64 linux-arm version image tidy clean
 
 # 编译当前平台，产物统一放 dist/，不污染项目根目录
 build:
@@ -71,6 +71,19 @@ version:
 	@echo "COMMIT  = $(COMMIT)"
 	@echo "DATE    = $(DATE)"
 	@echo "REPO    = $(REPO)"
+
+# 本地构建镜像。和发布出去的那个**注的是同一组变量**——不传的话镜像里的版本就是 dev，
+# 界面上的「关于」会显示"这个构建没有配置更新检查"，那是刻意的（自己构建的二进制不该
+# 假装成某个正式版本）。要带上版本号：`make image VERSION=1.0.0 REPO=你/仓库名`
+#
+# 只构建本机架构；发布用的三架构由 .github/workflows/docker.yml 用 buildx 出。
+image:
+	docker build \
+	  --build-arg VERSION=$(VERSION) \
+	  --build-arg COMMIT=$(COMMIT) \
+	  --build-arg BUILD_DATE=$(DATE) \
+	  --build-arg REPO=$(REPO) \
+	  -t $(BINARY):$(VERSION) -t $(BINARY):latest .
 
 tidy:
 	go mod tidy

@@ -7,6 +7,9 @@
 # 只想用现成镜像的话，把 build / image 两行换成你自己的镜像地址即可。
 services:
   quickshare:
+    # 用现成的镜像就不必本地构建，把下面两行换成注释里那行即可
+    # （把 <用户名> 换成 Docker Hub 用户名，tag 用 1.0.0 / 1.0 / latest 都行）：
+    #   image: <用户名>/quickshare:latest
     build: .
     image: quickshare:latest
     container_name: quickshare
