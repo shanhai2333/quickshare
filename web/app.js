@@ -567,12 +567,16 @@ QSSettings.init({
 // 先用默认外观摆好确定的初始态：无背景、滑块禁用。
 // 主题沿用服务端注入到 <html data-theme> 的值，避免首帧闪色。
 // 服务端设置拉回来后，init() 里的 QSSettings.apply 会覆盖它。
+//
+// **刻意不写 textTTL**：这一页目前没注册 onApplied，写了也没人读；但它和
+// `text.js` 里那次初始 apply 是同一个东西，而那边一旦带上 textTTL 就会被
+// onApplied 当成真实设置、把提示打成"永久保留"（详见 text.js 的注释）。
+// 两处保持同样的形状，省得将来给这一页加 onApplied 时踩同一个坑。
 QSSettings.apply({
   theme: document.documentElement.getAttribute('data-theme') || '',
   background: null,
   bgBlur: 0,
   opacity: { topbar: 85, upload: 85, files: 85 },
-  textTTL: { value: 0, unit: 'day' },
   pruneDevices: false,
 });
 

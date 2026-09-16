@@ -762,20 +762,34 @@ QSSettings.init({
   onDataDirChanged: refreshAll,
   // 保留时长一改，列表头那句提示要立刻跟着变——它就在这一页上，
   // 等下次刷新才变会很怪。
+  //
+  // **不带 textTTL 的调用必须直接忽略**：页面加载时下面那次
+  // `QSSettings.apply({...})` 是**只带外观**的，而 `apply()` 最后一行同样会回调到
+  // 这里。拿它去覆盖 state.ttl，就会在首帧把提示写成"永久保留"——真实的保留时长
+  // 要等 `init()` 的 `/api/settings` 回来才知道，中间那段显示的是**错信息**。
+  // 实测（`.tmp/shots/probe-ttl-hint-flash.mjs` 录下每次文案变化）：
+  //   +22ms "永久保留"  →  +26ms "保留 2 小时"
+  // 本机只错 4ms 看不出来，NAS 上或弱网下就是肉眼可见的"明明开了自动清理、
+  // 却写着永久保留"。忽略之后提示保持空着（HTML 里本来就是空的）——
+  // 空 = 还不知道，比写错强。
   onApplied: (s) => {
-    state.ttl = s.textTTL || { value: 0, unit: 'day' };
+    if (!s.textTTL) return;
+    state.ttl = s.textTTL;
     renderTTL();
   },
 });
 
 // 初始外观：主题沿用服务端注入到 <html data-theme> 的值，避免首帧闪色。
 // 服务端设置拉回来后，init() 里的 QSSettings.apply 会覆盖它。
+//
+// **这里刻意不写 textTTL**：这是"只带外观"的一次调用，写了就会被 onApplied
+// 当成真实设置、把提示打成"永久保留"（见上面那段注释）。`apply()` 内部对缺字段
+// 本来就有默认值，不写不会出错。
 QSSettings.apply({
   theme: document.documentElement.getAttribute('data-theme') || '',
   background: null,
   bgBlur: 0,
   opacity: { topbar: 85, upload: 85, files: 85 },
-  textTTL: { value: 0, unit: 'day' },
   pruneDevices: false,
 });
 
