@@ -85,12 +85,19 @@ jobs:
           cat SHA256SUMS.txt
 
       # 用 runner 预装的 gh，不引第三方 action
+      #
+      # **`--repo` 不能省**：这个 job 只下载产物、不 checkout 源码，工作区里没有 `.git`。
+      # 而 gh 默认要靠本地 git remote 推断"这是哪个仓库"，没有就报
+      #   failed to run git: fatal: not a git repository (or any of the parent directories): .git
+      # 显式给它仓库名最省事——省掉一次 checkout（这个 job 本来也不需要源码），
+      # 而且写明了发到哪个仓库，不依赖"当前目录碰巧是哪个 git 仓库"。
       - name: 创建 Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
             dist/*
