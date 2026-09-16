@@ -633,7 +633,18 @@ git push origin v1.0.0
 
 ### 网页端怎么检测更新
 
-设置面板的「关于」里显示当前版本，服务端会去问 GitHub：
+设置面板的「关于」里显示当前版本，服务端会去问远端。**问哪个源由 `QS_UPDATE_SOURCE` 决定**：
+
+| 源 | 怎么查 | 什么时候用 |
+|---|---|---|
+| `github`（默认） | `api.github.com/repos/{repo}/releases/latest` | 仓库是公开的 |
+| `dockerhub` | `hub.docker.com/v2/repositories/{repo}/tags`，自己挑最大的 `X.Y.Z` | **仓库是私有的**，或者你就是用 Docker 部署的 |
+
+> **私有仓库只能走 `dockerhub` 源。** 未认证请求查 GitHub 私有仓库一律回 404，而这个 404
+> 会被当成"还没发过 Release"（那确实不算错误），于是更新检查永远查不到东西。
+> Docker Hub 的**公开**仓库不认证也能读 tag 列表 —— 所以用 `dockerhub` 源时，
+> **Docker Hub 上的仓库也必须是公开的**，私有的同样 404。
+> 一句话：**「私有」和「能匿名查版本」天生互斥，两个源都一样。**
 
 ```
 GET /api/version        → 立刻返回缓存，同时在后台刷新
@@ -652,10 +663,18 @@ POST /api/version/check → 绕过缓存同步查一次（「检查更新」按�
 - **比不出来时沉默**：tag 千奇百怪，`version.Compare` 认不出来就返回"相等"。
   宁可漏报，不可误报——天天弹一个假的更新提示比不弹更烦人
 - **仓库还没发布过（404）不算错误**：那是完全正常的状态
+- **响应里单独有个 `enabled` 字段**表示"这个构建配了更新检查"。没有它的话，`latest`
+  为空既可能是"压根没配"也可能是"配了但读不到"，界面只能说一句话，而那句话对其中
+  一半情况必然是错的——`enabled` 就是让界面能说实话的那把钥匙
 
-不想让它联网就设 `QS_UPDATE_CHECK=0`。**注意 `QS_UPDATE_REPO=` 留空并不能关掉它**：
-空值会回落到构建时注入的那个仓库名（正式发布的镜像里已经注好了），
-所以"想关掉"只有 `QS_UPDATE_CHECK=0` 这一条路。
+想关掉检查就设 `QS_UPDATE_CHECK=0`。
+
+> **`QS_UPDATE_REPO=` 留空并不能关掉它**：`github` 源下空值会回落到构建时注入的仓库名
+> （正式发布的镜像里已经注好了），所以"想关掉"只有 `QS_UPDATE_CHECK=0` 这一条路。
+>
+> 但 **`QS_UPDATE_SOURCE=dockerhub` 而没给 `QS_UPDATE_REPO` 时会主动关掉并在日志里说明** ——
+> 注入的那个是 GitHub 仓库名，放到 Docker Hub 的命名空间下一定查不到（两边用户名都可能
+> 不同）。静默地查一个必然 404 的名字，比直接关掉更糟。
 
 ---
 
@@ -673,7 +692,8 @@ POST /api/version/check → 绕过缓存同步查一次（「检查更新」按�
 | `QS_MAX_FILE_SIZE` | — | `0` | 单文件上限（字节），0 表示不限 |
 | `QS_UPLOAD_TTL_HOURS` | — | `24` | 未完成上传保留时长（小时），超时自动清理 |
 | `QS_UPDATE_CHECK` | — | `true` | 是否允许联网检查更新。**完全不出网的内网设成 `0`** |
-| `QS_UPDATE_REPO` | — | 构建时注入的仓库 | 检查哪个仓库的 release，`owner/name`。**留空是回落到注入值，不是"不检查"** |
+| `QS_UPDATE_SOURCE` | — | `github` | 问哪个源：`github` 或 `dockerhub`。**GitHub 仓库是私有的就用 `dockerhub`**（见「网页端怎么检测更新」） |
+| `QS_UPDATE_REPO` | — | 构建时注入的仓库 | 检查哪个仓库，`owner/name`，**属于 `QS_UPDATE_SOURCE` 那个源**。`github` 源下留空是回落到注入值、不是"不检查"；`dockerhub` 源下**必须显式给**，否则检查会被关掉 |
 
 布尔型环境变量认 `1/0`、`true/false`、`yes/no`、`on/off`，写别的会打印一行提示并退回默认值。
 

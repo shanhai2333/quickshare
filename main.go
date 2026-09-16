@@ -55,6 +55,9 @@ func main() {
 		dataDir = launch.DataDir
 	}
 
+	// 更新检查问哪个源、查哪个仓库。两个都返回空串表示不做检查。
+	updateSource, updateRepo := updateTarget()
+
 	cfg := server.Config{
 		DataDir:       dataDir,
 		AdminToken:    os.Getenv("QS_ADMIN_TOKEN"),
@@ -62,7 +65,8 @@ func main() {
 		MaxFileSize:   envInt("QS_MAX_FILE_SIZE", 0),
 		UploadTTL:     time.Duration(envInt("QS_UPLOAD_TTL_HOURS", 24)) * time.Hour,
 		Version:       version.Version,
-		UpdateRepo:    updateRepo(),
+		UpdateSource:  updateSource,
+		UpdateRepo:    updateRepo,
 		DataDirLocked: explicitData,
 		PersistDataDir: func(dir string) error {
 			launch.DataDir = dir
@@ -261,19 +265,49 @@ func lanIPs() []string {
 	return out
 }
 
-// updateRepo 决定要不要做更新检查、检查哪个仓库。
+// updateTarget 决定要不要做更新检查、问哪个源、查哪个仓库。
 //
-// 默认用构建时注入的仓库（CI 里注入 ${{ github.repository }}）。**本地构建注入的是
+// 默认问 GitHub，仓库取构建时注入的 ${{ github.repository }}。**本地构建注入的是
 // 空串，也就是不检查** —— 自己编的二进制不该去问远端有没有新版本。
 //
-// QS_UPDATE_REPO 可以覆盖仓库（fork 之后自己发布的话用得上）；
-// QS_UPDATE_CHECK=0 可以整个关掉——内网完全不出网的环境里，开着它只会让
-// 每次打开设置面板都白等一个必然超时的请求。
-func updateRepo() string {
+//	QS_UPDATE_SOURCE  问哪个源：github（默认）或 dockerhub
+//	QS_UPDATE_REPO    那个源里的 "owner/name"；不设则用注入的 GitHub 仓库
+//	QS_UPDATE_CHECK=0 整个关掉——内网完全不出网的环境里，开着它只会让每次打开
+//	                  设置面板都白等一个必然超时的请求
+//
+// **为什么需要 dockerhub 这个源**：未认证请求查 GitHub 私有仓库一律 404，
+// 而 Docker Hub 的公开仓库不认证也能读 tag 列表。用 Docker 部署、又不想把
+// GitHub 仓库公开的话，就靠它。
+func updateTarget() (source, repo string) {
 	if !envBool("QS_UPDATE_CHECK", true) {
-		return ""
+		return "", ""
 	}
-	return envOr("QS_UPDATE_REPO", version.Repo)
+
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QS_UPDATE_SOURCE"))) {
+	case "", server.SourceGitHub:
+		source = server.SourceGitHub
+	case server.SourceDockerHub:
+		source = server.SourceDockerHub
+	default:
+		fmt.Fprintf(os.Stderr, "环境变量 QS_UPDATE_SOURCE 只认 %q / %q，无法识别，按 %q 处理\n",
+			server.SourceGitHub, server.SourceDockerHub, server.SourceGitHub)
+		source = server.SourceGitHub
+	}
+
+	repo = strings.TrimSpace(os.Getenv("QS_UPDATE_REPO"))
+	if repo != "" {
+		return source, repo
+	}
+	if source == server.SourceDockerHub {
+		// **绝不能回落到 version.Repo**：那是 GitHub 的仓库名，放到 Docker Hub 的
+		// 命名空间下一定查不到（两边用户名都可能不同），结果就是一个永远查不到、
+		// 又看不出原因的检查。宁可关掉并在日志里说清楚。
+		fmt.Fprintf(os.Stderr,
+			"QS_UPDATE_SOURCE=%s 但没设 QS_UPDATE_REPO（要写成 Docker Hub 的 用户名/镜像名），更新检查已关闭\n",
+			server.SourceDockerHub)
+		return "", ""
+	}
+	return source, version.Repo
 }
 
 func envOr(key, def string) string {

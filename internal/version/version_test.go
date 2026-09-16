@@ -108,3 +108,29 @@ func TestString(t *testing.T) {
 		t.Errorf("String() = %q，期望 %q", got, want)
 	}
 }
+
+// IsFullSemver 是给 Docker Hub 挑最新 tag 用的：那边的列表里混着 latest、
+// 1.0、日期式标签，只有三段式才可信。**认宽了会弹一个假的"有新版本"**，
+// 所以这里把"该拒的"逐条钉死。
+func TestIsFullSemver(t *testing.T) {
+	yes := []string{"1.2.3", "0.0.1", "10.20.30", "v1.2.3", "V1.2.3", "1.2.3-rc1", "1.2.3+build5", " 1.2.3 "}
+	for _, s := range yes {
+		if !IsFullSemver(s) {
+			t.Errorf("IsFullSemver(%q) = false，期望 true", s)
+		}
+	}
+
+	no := []string{
+		"", "dev", "latest", "nightly", "stable", // 非版本号
+		"1.2", "1", "v1", // 段数不够——省略写法本项目不会产生，认了反而危险
+		"1.2.3.4",       // 段数多了
+		"20260916",      // 日期式标签：会被解析成 major=20260916，比谁都大
+		"1.2.x", "1..2", // 有非数字段
+		"1.2.3-", // 空预发布后缀，必须显式拒绝
+	}
+	for _, s := range no {
+		if IsFullSemver(s) {
+			t.Errorf("IsFullSemver(%q) = true，期望 false", s)
+		}
+	}
+}

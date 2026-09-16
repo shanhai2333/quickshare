@@ -30,13 +30,38 @@ const (
 	// 响应体最多读多少字节。GitHub 的 release JSON 里 assets 列表可能很大，
 	// 而我们只要四个字段。
 	updateMaxBody = 64 << 10
+
+	// Docker Hub 的 tags 列表比 GitHub 的 release JSON 大得多：**每个 tag 都带
+	// 一个 images[] 数组**（三架构就是三条），一条 tag 七百字节上下，100 条就近 70KB。
+	// 沿用 GitHub 那个 64KB 的限额会正好卡在中间，把 JSON 截断成"解析失败"。
+	updateMaxBodyDockerHub = 1 << 20
 )
 
-// githubAPIBase 是默认的 API 地址。抽成字段只为了测试能指向 httptest 服务。
-const githubAPIBase = "https://api.github.com"
+// 更新检查的两个源。用字符串而不是枚举，是为了直接对上环境变量的取值。
+const (
+	// SourceGitHub 问 GitHub 的 releases/latest——它直接给出最新版，最省事。
+	SourceGitHub = "github"
+
+	// SourceDockerHub 问 Docker Hub 的 tag 列表。**私有 GitHub 仓库用这个**：
+	// 未认证请求查私有仓库一律 404，而 Docker Hub 的公开仓库不认证也能读。
+	SourceDockerHub = "dockerhub"
+)
+
+// 两个源的 API 根地址。抽成字段只为了测试能指向 httptest 服务。
+const (
+	githubAPIBase    = "https://api.github.com"
+	dockerHubAPIBase = "https://hub.docker.com"
+)
 
 // updateStatus 是 /api/version 的响应体，也是界面直接渲染的东西。
 type updateStatus struct {
+	// Enabled 表示这个构建**配了**更新检查。
+	//
+	// 为什么非要单独给一个字段：Latest 为空有两种截然不同的原因——"压根没配"
+	// 和"配了但读不到"（仓库是私有的、还没发过 Release、网络不通）。只靠 Latest
+	// 为空分不出来，界面就只能挑一句话说，而那句话对其中一半情况必然是错的。
+	// 这个字段就是让界面能说实话的那把钥匙。
+	Enabled   bool   `json:"enabled"`
 	Current   string `json:"current"`   // 当前版本（构建时注入）
 	Latest    string `json:"latest"`    // 最新版本；空 = 还不知道
 	HasUpdate bool   `json:"hasUpdate"` // 当前 < 最新
@@ -47,18 +72,22 @@ type updateStatus struct {
 	Error     string `json:"error"`     // 查询失败的原因（给人看的）
 }
 
-// updateChecker 负责"问 GitHub 有没有新版本"，并把它缓存起来。
+// updateChecker 负责"问远端有没有新版本"，并把它缓存起来。
 //
-// 为什么不每次请求都去查：GitHub 未认证的 API 按 IP 限流（60 次/小时），
+// 支持两个源（见 SourceGitHub / SourceDockerHub），差别只在 fetch 那一层。
+//
+// 为什么不每次请求都去查：未认证的 API 都是按 IP 限流的（GitHub 只有 60 次/小时），
 // 而且内网部署的 NAS 很可能压根没有外网——每次打开设置面板都去连一次，
 // 轻则烧配额，重则每次白等 5 秒。
 type updateChecker struct {
+	// source 是 SourceGitHub 或 SourceDockerHub，决定查哪个 API。
+	source  string
 	repo    string
 	apiBase string
 	client  *http.Client
 
 	// fetchMu 串行化"真正去查一次"：后台刷新和按钮触发的强制刷新
-	// 不会同时打两次 GitHub。
+	// 不会同时打两次远端。
 	fetchMu sync.Mutex
 
 	mu      sync.Mutex
@@ -70,12 +99,22 @@ type updateChecker struct {
 	running bool
 }
 
-func newUpdateChecker(repo string) *updateChecker {
-	return &updateChecker{
-		repo:    strings.TrimSpace(repo),
-		apiBase: githubAPIBase,
-		client:  &http.Client{Timeout: updateTimeout},
+// newUpdateChecker 建一个检查器。**repo 为空 = 不做检查。**
+//
+// source 只认 SourceGitHub / SourceDockerHub；别的值按 GitHub 处理。取值校验
+// 放在 main.go（那里能往 stderr 写一句人看得懂的话），这里不重复一遍。
+func newUpdateChecker(source, repo string) *updateChecker {
+	c := &updateChecker{
+		source: source,
+		repo:   strings.TrimSpace(repo),
+		client: &http.Client{Timeout: updateTimeout},
 	}
+	if c.source == SourceDockerHub {
+		c.apiBase = dockerHubAPIBase
+	} else {
+		c.apiBase = githubAPIBase
+	}
+	return c
 }
 
 // status 返回当前状态，并在需要时**在后台**发起一次刷新。
@@ -148,6 +187,7 @@ func (c *updateChecker) snapshot() updateStatus {
 	defer c.mu.Unlock()
 
 	st := updateStatus{
+		Enabled:   c.repo != "",
 		Current:   version.Version,
 		Latest:    c.latest,
 		URL:       c.url,
@@ -176,8 +216,16 @@ func (c *updateChecker) staleLocked() bool {
 	return time.Since(c.at) >= ttl
 }
 
-// fetch 真去问一次 GitHub。返回的版本号已经剥掉了 v 前缀。
+// fetch 按 source 去问对应的源。返回的版本号已经剥掉了 v 前缀。
 func (c *updateChecker) fetch() (tag, url, published string, err error) {
+	if c.source == SourceDockerHub {
+		return c.fetchDockerHub()
+	}
+	return c.fetchGitHub()
+}
+
+// fetchGitHub 问 releases/latest——它直接给出最新版，最省事。
+func (c *updateChecker) fetchGitHub() (tag, url, published string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
 	defer cancel()
 
@@ -216,6 +264,71 @@ func (c *updateChecker) fetch() (tag, url, published string, err error) {
 	}
 	// /releases/latest 本身就会跳过 draft 和 prerelease，不用自己筛。
 	return strings.TrimPrefix(body.TagName, "v"), body.HTMLURL, body.PublishedAt, nil
+}
+
+// fetchDockerHub 从 tag 列表里挑出最大的三段式版本。
+//
+// Docker Hub 没有 GitHub 那种"直接告诉我最新版"的接口，只给一个 tag 列表，
+// 所以"哪个最新"得自己算。**绝不能取 results[0]**：列表按最后推送时间倒序，
+// 而 `latest` 这个标签往往就是最后推上去的，永远排在最前面——取第一个等于
+// 永远认为最新版叫 "latest"。
+//
+// 分页：默认按最后推送时间倒序，最新的几个一定在第一页里，所以只读一页就够
+// （page_size 给 100，正常项目用不完）。
+func (c *updateChecker) fetchDockerHub() (tag, url, published string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.apiBase+"/v2/repositories/"+c.repo+"/tags?page_size=100", nil)
+	if err != nil {
+		return "", "", "", err
+	}
+	req.Header.Set("User-Agent", "QuickShare/"+version.Version)
+	req.Header.Set("Accept", "application/json")
+
+	res, err := c.client.Do(req)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	// 404 = 仓库不存在、或者是私有的。**和 GitHub 那边一样不算故障**：
+	// 界面靠 enabled 字段说明这到底是"没配"还是"读不到"，不靠这个错误。
+	if res.StatusCode == http.StatusNotFound {
+		return "", "", "", nil
+	}
+	if res.StatusCode != http.StatusOK {
+		return "", "", "", fmt.Errorf("Docker Hub 返回 %d", res.StatusCode)
+	}
+
+	var body struct {
+		Results []struct {
+			Name        string `json:"name"`
+			LastUpdated string `json:"last_updated"`
+		} `json:"results"`
+	}
+	dec := json.NewDecoder(io.LimitReader(res.Body, updateMaxBodyDockerHub))
+	if err := dec.Decode(&body); err != nil {
+		return "", "", "", fmt.Errorf("解析 Docker Hub 响应失败: %w", err)
+	}
+
+	// 列表里混着 `latest`、`1.0`、日期式标签，只认三段式再取最大的那个。
+	// IsFullSemver 的注释里写了为什么这么严。
+	for _, r := range body.Results {
+		if !version.IsFullSemver(r.Name) {
+			continue
+		}
+		if tag == "" || version.Compare(r.Name, tag) > 0 {
+			tag, published = r.Name, r.LastUpdated
+		}
+	}
+	if tag == "" {
+		// 一个三段式 tag 都没有（比如仓库里只有 `latest`）。不是错误，
+		// 只是"查不到能比的版本"，和 404 一样走"沉默"。
+		return "", "", "", nil
+	}
+	return tag, "https://hub.docker.com/r/" + c.repo + "/tags", published, nil
 }
 
 // ---------------------------------------------------------------- 接口

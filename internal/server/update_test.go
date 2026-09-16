@@ -2,9 +2,11 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -48,8 +50,15 @@ func fakeGitHub(t *testing.T, status int, body string) (*httptest.Server, *int32
 }
 
 func newTestChecker(srv *httptest.Server) *updateChecker {
-	c := newUpdateChecker("owner/repo")
+	c := newUpdateChecker(SourceGitHub, "owner/repo")
 	c.apiBase = srv.URL // 只为了测试能指向假服务端
+	return c
+}
+
+// newTestDockerChecker 同上，但指向 Docker Hub 那个源。
+func newTestDockerChecker(srv *httptest.Server) *updateChecker {
+	c := newUpdateChecker(SourceDockerHub, "owner/quickshare")
+	c.apiBase = srv.URL
 	return c
 }
 
@@ -70,14 +79,37 @@ func waitForCheck(t *testing.T, c *updateChecker) updateStatus {
 }
 
 // 没配仓库（本地构建就是这种）就什么都不做，更不许报错。
+//
+// Enabled 必须是 false —— 界面靠它区分"没配置"和"配置了但读不到"，
+// 少了这个字段就只能把两种情况说成同一句话，而那句话必然有一半是错的。
 func TestUpdateNoRepoMeansNoCheck(t *testing.T) {
-	c := newUpdateChecker("")
+	c := newUpdateChecker(SourceGitHub, "")
 	st := c.status()
+	if st.Enabled {
+		t.Error("没配仓库时 Enabled 必须是 false")
+	}
 	if st.Checking || st.Latest != "" || st.Error != "" {
 		t.Fatalf("没配仓库时不该有任何检查动作: %+v", st)
 	}
 	if st.Current != version.Version {
 		t.Errorf("Current = %q，期望 %q", st.Current, version.Version)
+	}
+}
+
+// 配了仓库就要如实说 Enabled=true。这条是"私有仓库读不到"能说真话的前提：
+// 仓库私有、未认证 API 回 404 时，Latest 同样是空的，只有 Enabled 能把它们分开。
+func TestUpdateEnabledReflectsRepo(t *testing.T) {
+	srv, _ := fakeGitHub(t, http.StatusNotFound, `{"message":"Not Found"}`)
+
+	st := newTestChecker(srv).checkNow()
+	if !st.Enabled {
+		t.Error("配了仓库时 Enabled 必须是 true")
+	}
+	if st.Latest != "" {
+		t.Errorf("404 时不该有版本信息，实际 latest=%q", st.Latest)
+	}
+	if st.Error != "" {
+		t.Errorf("404 不该报错，实际 %q", st.Error)
 	}
 }
 
@@ -248,6 +280,181 @@ func TestUpdateCheckNowRefetches(t *testing.T) {
 	c.checkNow()
 	if n := atomic.LoadInt32(hits); n != 2 {
 		t.Errorf("checkNow 应当强制再查一次，实际共查了 %d 次", n)
+	}
+}
+
+// ---------------------------------------------------------------- Docker Hub
+
+// dockerTagsJSON 造一个 Docker Hub 的 tags 响应。
+//
+// 字段照着真实响应抄：每个 tag 都带一个 images[] 数组（三架构就是三条）加一个
+// digest。**这个体积是有意义的**——它正是 Docker Hub 的响应比 GitHub 的
+// release JSON 大一个数量级的原因，也是读取限额必须单独设的原因。
+func dockerTagsJSON(names ...string) string {
+	var b strings.Builder
+	b.WriteString(`{"count":`)
+	b.WriteString(strconv.Itoa(len(names)))
+	b.WriteString(`,"results":[`)
+	for i, n := range names {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"creator":9921361,"id":1312106969,"name":`)
+		b.WriteString(strconv.Quote(n))
+		b.WriteString(`,"last_updated":"2026-09-16T13:33:04.21307Z","full_size":10342540,` +
+			`"tag_status":"active",` +
+			`"digest":"sha256:a675c3ddb967f75b622a4a71154b07243a79bf0d15a80e94dcda3cd4eeef15a1",` +
+			`"images":[`)
+		for j, arch := range []string{"amd64", "arm64", "arm"} {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`{"architecture":` + strconv.Quote(arch) +
+				`,"os":"linux","variant":null,"features":"","size":10342540,"status":"active",` +
+				`"digest":"sha256:e09ab6deddb8bf6826abc3b93a81a8064ba4f8f9858a70d53204cf68a6b5e699",` +
+				`"last_pushed":"2026-09-16T13:32:59.252289931Z"}`)
+		}
+		b.WriteString(`]}`)
+	}
+	b.WriteString(`]}`)
+	return b.String()
+}
+
+// fakeDockerHub 起一个假的 Docker Hub API。同时验证路径对得上、以及带上了 UA。
+func fakeDockerHub(t *testing.T, status int, body string) (*httptest.Server, *int32) {
+	t.Helper()
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		if !strings.HasSuffix(r.URL.Path, "/tags") {
+			t.Errorf("请求路径不对: %s", r.URL.Path)
+		}
+		if r.Header.Get("User-Agent") == "" {
+			t.Error("请求没带 User-Agent")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// Docker Hub 没有"直接给最新版"的接口，只给 tag 列表，得自己算最大。
+//
+// 这里的顺序**就是实际返回的顺序**：`latest` 排在最前面（它最后被推上去）。
+// 所以这条用例真正防的是"图省事取 results[0]"——那会永远认为最新版叫 latest。
+func TestUpdateDockerHubPicksHighestVersion(t *testing.T) {
+	setVersion(t, "1.0.0")
+	srv, _ := fakeDockerHub(t, http.StatusOK, dockerTagsJSON("latest", "1.0", "1.0.0"))
+
+	st := newTestDockerChecker(srv).checkNow()
+	if st.Latest != "1.0.0" {
+		t.Fatalf("Latest = %q，期望 1.0.0（latest 和 1.0 都不该被选中）", st.Latest)
+	}
+	if !st.Enabled {
+		t.Error("配了仓库时 Enabled 必须是 true")
+	}
+	if st.URL != "https://hub.docker.com/r/owner/quickshare/tags" {
+		t.Errorf("URL = %q", st.URL)
+	}
+	if st.Error != "" {
+		t.Errorf("不该有错误: %q", st.Error)
+	}
+}
+
+// 日期式标签必须被无视：`20260916` 会被解析成 major=20260916，比任何正常版本号
+// 都大。只认三段式就是为了挡这个。
+func TestUpdateDockerHubIgnoresDateLikeTags(t *testing.T) {
+	setVersion(t, "1.0.0")
+	srv, _ := fakeDockerHub(t, http.StatusOK, dockerTagsJSON("latest", "20260916", "1.0.0", "nightly"))
+
+	if st := newTestDockerChecker(srv).checkNow(); st.Latest != "1.0.0" {
+		t.Errorf("Latest = %q，期望 1.0.0（日期式标签必须被无视）", st.Latest)
+	}
+}
+
+func TestUpdateDockerHubReportsNewer(t *testing.T) {
+	setVersion(t, "1.0.0")
+	srv, _ := fakeDockerHub(t, http.StatusOK, dockerTagsJSON("latest", "1.0.0", "1.2.0"))
+
+	st := newTestDockerChecker(srv).checkNow()
+	if st.Latest != "1.2.0" {
+		t.Fatalf("Latest = %q，期望 1.2.0", st.Latest)
+	}
+	if !st.HasUpdate {
+		t.Error("1.0.0 < 1.2.0，应当提示有更新")
+	}
+}
+
+// 私有仓库、或者仓库不存在时 Docker Hub 回 404。和 GitHub 那边一样不算故障，
+// **但 Enabled 必须还是 true** —— 界面靠它说出"读不到"而不是"没配置"。
+func TestUpdateDockerHubNotFoundIsNotAnError(t *testing.T) {
+	setVersion(t, "1.0.0")
+	srv, _ := fakeDockerHub(t, http.StatusNotFound, `{"message":"object not found"}`)
+
+	st := newTestDockerChecker(srv).checkNow()
+	if st.Error != "" {
+		t.Errorf("404 不该报错，实际 %q", st.Error)
+	}
+	if st.Latest != "" || st.HasUpdate {
+		t.Errorf("404 时不该有版本信息: %+v", st)
+	}
+	if !st.Enabled {
+		t.Error("404 不代表没配置——Enabled 必须还是 true")
+	}
+}
+
+// 一个三段式 tag 都没有（比如仓库里只推过 latest）时沉默：不报错，也不乱猜。
+func TestUpdateDockerHubNoUsableTag(t *testing.T) {
+	setVersion(t, "1.0.0")
+	srv, _ := fakeDockerHub(t, http.StatusOK, dockerTagsJSON("latest"))
+
+	st := newTestDockerChecker(srv).checkNow()
+	if st.Error != "" {
+		t.Errorf("不该报错，实际 %q", st.Error)
+	}
+	if st.Latest != "" {
+		t.Errorf("Latest = %q，期望空（挑不出可比的三段式版本）", st.Latest)
+	}
+}
+
+func TestUpdateDockerHubServerErrorIsReported(t *testing.T) {
+	setVersion(t, "1.0.0")
+	srv, _ := fakeDockerHub(t, http.StatusInternalServerError, `{}`)
+
+	if st := newTestDockerChecker(srv).checkNow(); !strings.Contains(st.Error, "500") {
+		t.Errorf("Error = %q，期望提到 500", st.Error)
+	}
+}
+
+// Docker Hub 的响应比 GitHub 的大一个数量级，所以读取限额是单独设的。
+// 这条用例塞进 150 个 tag，防止有人把它改回 GitHub 那个 64KB——那样会**正好卡在
+// 中间**，把 JSON 截断成"解析失败"，而且只在 tag 多的仓库上才暴露。
+func TestUpdateDockerHubHandlesLargeResponse(t *testing.T) {
+	setVersion(t, "1.0.0")
+
+	names := make([]string, 0, 160)
+	names = append(names, "latest")
+	for i := 0; i < 150; i++ {
+		names = append(names, fmt.Sprintf("0.%d.0", i))
+	}
+	// 最大的放在**最后**，确保实现真的扫完了整个列表，而不是只看开头几个。
+	names = append(names, "2.0.0")
+
+	body := dockerTagsJSON(names...)
+	if len(body) < updateMaxBody {
+		t.Fatalf("这条用例的前提是响应体超过 GitHub 的 %d 字节限额，实际只有 %d 字节",
+			updateMaxBody, len(body))
+	}
+
+	srv, _ := fakeDockerHub(t, http.StatusOK, body)
+	st := newTestDockerChecker(srv).checkNow()
+	if st.Error != "" {
+		t.Fatalf("不该报错: %q（响应体 %d 字节）", st.Error, len(body))
+	}
+	if st.Latest != "2.0.0" {
+		t.Errorf("Latest = %q，期望 2.0.0（响应体 %d 字节，可能被限额截断了）", st.Latest, len(body))
 	}
 }
 

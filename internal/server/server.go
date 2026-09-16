@@ -39,8 +39,15 @@ type Config struct {
 	// 留空表示用 internal/version 里的默认值（本地 go build 就是 "dev"）。
 	Version string
 
-	// UpdateRepo 是 "owner/name" 形式的 GitHub 仓库，更新检查用。
-	// **留空表示不做更新检查** —— 本地构建、以及显式关掉检查的部署都是这种。
+	// UpdateSource 是更新检查问哪个源：SourceGitHub（默认）或 SourceDockerHub。
+	UpdateSource string
+
+	// UpdateRepo 是 "owner/name" 形式的仓库名，**属于 UpdateSource 那个源**，
+	// 更新检查用。**留空表示不做更新检查** —— 本地构建、以及显式关掉检查的
+	// 部署都是这种。
+	//
+	// 注意两个源的命名空间是分开的：GitHub 上叫 shanhai2333/quickshare、
+	// Docker Hub 上可能叫 shanhaijun/quickshare，不能混用。
 	UpdateRepo string
 
 	// DataDirLocked 为真表示数据目录由部署方式决定（命令行参数或环境变量），
@@ -111,7 +118,7 @@ func New(cfg Config, st *store.Store, web fs.FS) *Server {
 		web:    web,
 		assets: assetVersion(web),
 		events: newEventHub(),
-		update: newUpdateChecker(cfg.UpdateRepo),
+		update: newUpdateChecker(cfg.UpdateSource, cfg.UpdateRepo),
 	}
 	s.cur.Store(&backend{st: st, dataDir: cfg.DataDir})
 	return s

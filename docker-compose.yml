@@ -46,8 +46,20 @@ services:
       # 有没有新版本。**完全不出网的内网设成 "0"**，免得每次打开设置面板都
       # 白等一次必然失败的请求（不会卡住界面，但也没意义）。
       QS_UPDATE_CHECK: "1"
-      # 想改检查哪个仓库就填 "owner/name"。留空 = 用构建时注入的那个
-      # （正式发布的镜像里已经注好了，正常不用管这一项）。
+
+      # 问哪个源。
+      #   github   —— 默认。查 GitHub 的 releases/latest。
+      #   dockerhub —— 查 Docker Hub 的 tag 列表。**GitHub 仓库是私有的就用这个**：
+      #                未认证请求查私有仓库一律 404，更新检查会永远查不到东西。
+      QS_UPDATE_SOURCE: "github"
+
+      # 检查哪个仓库，"owner/name"，**属于上面那个源**。
+      #   github 源下留空 = 用构建时注入的那个（正式发布的镜像里已经注好了）。
+      #   dockerhub 源下**必须显式填**，而且 Docker Hub 上的仓库得是公开的；
+      #   不填的话检查会被直接关掉并在日志里说明（注入的那个是 GitHub 仓库名，
+      #   放到 Docker Hub 命名空间下一定查不到）。
+      # 用 dockerhub 时把下面这行换成你自己的，例如：
+      #   QS_UPDATE_REPO: "你的DockerHub用户名/quickshare"
       QS_UPDATE_REPO: ""
 
     # 让容器以 NAS 上的目标用户身份运行，避免数据目录权限问题。

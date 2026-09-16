@@ -515,8 +515,14 @@ const QSSettings = (() => {
       hint.textContent = '正在检查更新…';
     } else if (v.error) {
       hint.textContent = '检查更新失败：' + v.error;
-    } else if (!v.latest) {
+    } else if (!v.enabled) {
       hint.textContent = '这个构建没有配置更新检查。';
+    } else if (!v.latest) {
+      // **配置了却读不到**，和"没配置"是两回事，以前共用一句话是错的。
+      // 最常见的成因：仓库是私有的——未认证请求查私有仓库一律 404，
+      // 而服务端刻意不把 404 当错误（"还没发过 Release"也确实正常）。
+      // 所以这里不能报错，但也不能说成"没配置"，那会把人引到错误的方向。
+      hint.textContent = '已配置更新检查，但读不到发布信息（仓库可能不是公开的，或还没发过 Release）。';
     } else if (v.current === 'dev') {
       // 开发版比不出大小，所以永远不提示"有更新"，但要让人看得到最新发布版是哪个
       hint.textContent = '开发版构建；最新发布版是 ' + v.latest + '。';

@@ -95,7 +95,10 @@ func cmpInt(a, b int) int {
 
 type semver struct {
 	major, minor, patch int
-	pre                 string
+	// parts 记录**原样写了几段**（1 / 2 / 3）。比较用不到它，但 IsFullSemver
+	// 要——`1.2` 和 `1.2.0` 解析出来的三个数字完全一样，只有段数能区分。
+	parts int
+	pre   string
 }
 
 // parse 解析 `1.2.3` / `v1.2.3` / `1.2` / `1` / `1.2.3-rc1+build5`。
@@ -136,8 +139,24 @@ func parse(s string) (semver, bool) {
 		}
 		*fields[i] = n
 	}
+	out.parts = len(parts)
 	out.pre = pre
 	return out, true
+}
+
+// IsFullSemver 报告 s 是不是**写全了三段**的版本号（`1.2.3`，可带 `-rc1` 这类后缀）。
+//
+// 这是给 Docker Hub 挑最新 tag 用的：那边没有"直接告诉我最新版"的接口，只给一个
+// tag 列表，得自己算最大。而那个列表里混着 `latest`、`1.0`，以及日期式标签
+// （`20260916` 会被解析成 major=20260916，看着比谁都大）。**只认三段式能把它们
+// 挡在外面。**
+//
+// 刻意不认 `1.2` 这种省略写法：本项目的 `docker/metadata-action` 固定产出
+// `1.0.0` / `1.0` / `latest` 三个标签，三段式那个一定在，所以不认它不会漏。
+// **宁可漏报不可误报**——认错了会弹一个假的"有新版本"。
+func IsFullSemver(s string) bool {
+	sv, ok := parse(s)
+	return ok && sv.parts == 3
 }
 
 // atoiStrict 只接受纯数字。刻意不用 strconv.Atoi —— 它认 "+1" 和 "-1"，
