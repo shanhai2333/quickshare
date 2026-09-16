@@ -1,0 +1,98 @@
+name: CI
+
+# 每次推分支、开 PR 都跑一遍。
+#
+# 刻意**不在 tag 上跑**：发版是 release.yml / docker.yml 的事，
+# 让它们各自跑各自的，别在这里重复等一遍。
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 静态检查与单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 格式单独跑一步：go vet 和 go test 都不会因为没格式化而失败，
+      # 所以不显式检查的话，格式会一点点烂掉。
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l . || true)"
+          if [ -n "${unformatted}" ]; then
+            echo "::error::下面这些文件没格式化，本地跑 gofmt -w 修一下："
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: 单元测试
+        run: go test ./...
+
+  e2e:
+    name: 端到端验证
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # e2e.sh 自己会去找 ./dist/quickshare，先给它编一个
+      - name: 编译
+        run: go build -trimpath -o dist/quickshare .
+
+      - name: 端到端验证
+        env:
+          # 脚本默认把临时文件放在仓库的 .tmp/e2e 下（Git Bash 上的 curl 只认
+          # Windows 路径，所以默认值是 D:/... 形式）。Linux 上指到 /tmp 更干净。
+          QS_E2E_TMP: /tmp/qs-e2e
+        run: bash e2e.sh
+
+  # 交叉编译一遍所有目标平台。
+  #
+  # 单独一个 job：这一条挂掉通常意味着某个平台特有的代码坏了
+  # （比如某个 syscall 只在 linux 有），而单测在 linux/amd64 上全绿，
+  # 不编一遍是发现不了的。
+  crossbuild:
+    name: 交叉编译 ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, goarm: '' }
+          - { goos: linux, goarch: arm64, goarm: '' }
+          - { goos: linux, goarch: arm, goarm: '7' }
+          - { goos: windows, goarch: amd64, goarm: '' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 编译
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: '0'
+        run: go build -trimpath -o /dev/null .

@@ -1,0 +1,20 @@
+# 换行符统一成 LF，别让 git 在检出时改成 CRLF。
+#
+# 为什么必须有这个文件：`core.autocrlf=true`（Windows 上很常见的默认值）会把
+# 工作区里的换行符换成 CRLF，而这件事会**在两个地方炸**：
+#
+#   1. `gofmt -l` 把 CRLF 的 Go 文件判成"没格式化"——CI 里那步会红一片，
+#      而本地（工作区刚好是 LF 时）看不出来。已实测确认过这个行为。
+#   2. `e2e.sh` / `Makefile` / `entrypoint` 这类脚本带 `\r` 就没法用：
+#      bash 会把 `\r` 当成命令名的一部分（报 `$'\r': command not found`），
+#      make 会把规则读错。CI 跑在 Linux 上碰不到，本地 Windows 克隆必踩。
+#
+# 所以统一钉成 LF（不只是"入库时是 LF"，检出也必须是 LF）。这个文件随仓库走，
+# 别人克隆下来行为一致，不依赖各自机器上的 core.autocrlf 怎么设。
+* text=auto eol=lf
+
+# 明确标成二进制，别被当文本处理（PNG 里恰好有 0x0D 时会被误伤）
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary

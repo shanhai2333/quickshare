@@ -1,0 +1,96 @@
+name: Release
+
+# 打一个 v 开头的 tag 就发一版：
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# 产物是四个平台的静态二进制 + 一份 SHA256SUMS.txt，附在 GitHub Release 上。
+# 版本号**从 tag 推出来**（剥掉 v 前缀）注进二进制，所以发出去的每个文件
+# 都能自报家门 —— 界面上的「关于」和 /api/config 读的就是它。
+on:
+  push:
+    tags: ['v*']
+
+# gh release create 需要写权限
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 编译 ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      # 一个平台失败不影响其它平台 —— 四个都编出来更有用，
+      # 而不是看到第一个错误就全停下。
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64, goos: linux, goarch: amd64, goarm: '', ext: '' }
+          - { name: linux-arm64, goos: linux, goarch: arm64, goarm: '', ext: '' }
+          - { name: linux-armv7, goos: linux, goarch: arm, goarm: '7', ext: '' }
+          - { name: windows-amd64, goos: windows, goarch: amd64, goarm: '', ext: '.exe' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 编译
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          # 纯 Go 实现（含 SQLite 驱动），关掉 CGO 才有真正静态的二进制，
+          # 也才能这么轻松地交叉编译
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+
+          # tag 名去掉开头的 v：内部统一不带 v，比较版本时少一层判断
+          VERSION="${GITHUB_REF_NAME#v}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X quickshare/internal/version.Version=${VERSION} \
+              -X quickshare/internal/version.Commit=${GITHUB_SHA::7} \
+              -X quickshare/internal/version.Date=${DATE} \
+              -X quickshare/internal/version.Repo=${GITHUB_REPOSITORY}" \
+            -o "dist/quickshare-${{ matrix.name }}${{ matrix.ext }}" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quickshare-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: 发布
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # 校验和不是装饰：内网部署往往是把二进制拷来拷去，
+      # 有个官方给的 sha256 至少能确认"拿到的东西没坏"。
+      - name: 生成校验和
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # 用 runner 预装的 gh，不引第三方 action
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuickShare · 文本发送</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6fed'/%3E%3Cpath d='M24 19a2 2 0 0 1-2 2H11l-4 4V8a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-name">QuickShare</div>
+        <div class="brand-sub">文本发送</div>
+      </div>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-actions">
+      <a class="icon-btn" href="/" title="返回文件页">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3v5h5M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z"/>
+        </svg>
+      </a>
+      <button class="icon-btn" id="themeBtn" title="切换浅色 / 深色"></button>
+      <button class="icon-btn" id="settingsBtn" title="设置">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 008 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 003.68 15a1.65 1.65 0 00-1.51-1H2a2 2 0 110-4h.09A1.65 1.65 0 003.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.68h.08A1.65 1.65 0 0010 3.17V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.32 9v.08a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="card" id="authCard" hidden>
+    <div class="card-body">
+      <p class="muted auth-hint">本服务已开启访问口令，请输入后使用。</p>
+      <div class="pwd-row">
+        <input type="password" id="authInput" placeholder="请输入口令" autocomplete="current-password">
+        <button class="btn btn-primary" id="authBtn">进入</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 下面两个区块默认 hidden，是给"开了访问口令"的部署用的：不能让未鉴权的人
+       看到输入框。**没开口令时（内网自用的默认情况）服务端会在渲染时把这个
+       hidden 摘掉**（见 internal/server/settings.go 的 servePage），首帧就是可见的。
+
+       为什么要这么绕：不摘的话，它们要等 JS 跑完"config -> settings -> 三个并行请求"
+       三轮往返才露面。实测（注入 120ms 延迟模拟 NAS + WiFi）：顶栏 157ms 就画出来了，
+       主区一直空到 525ms——**切到文本页会空白 368ms**，而首页的卡片本来就没带 hidden，
+       所以"切回文件页"反而不空白。这个不对称就是"切页闪一下"的主因。
+
+       ⚠️ 服务端是按 ` id="composeCard" hidden` 这个字面量去替换的，
+       改这两行时**别调整属性顺序、别去掉那个空格**，否则会静默失效
+       （e2e 里有一条断言盯着渲染出来的 HTML）。 -->
+  <section class="card" id="composeCard" hidden>
+    <div class="card-body">
+      <textarea id="textInput" rows="5" spellcheck="false"
+        placeholder="把要发过去的文本贴在这里。比如一段链接、一串验证码、一段配置。"></textarea>
+      <div class="compose-row">
+        <span class="hint" id="composeHint"></span>
+        <span class="spacer"></span>
+        <span class="hint" id="deviceHint"></span>
+        <button class="btn btn-primary" id="sendBtn">发送</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="textsCard" hidden>
+    <div class="card-head">
+      <h2>文本列表</h2>
+      <span class="count" id="textCount">0</span>
+      <span class="spacer"></span>
+      <a class="ttl-hint" id="ttlHint" href="/#settings" title="点这里打开设置，调整文本自动清理的时间"></a>
+      <button class="btn btn-sm" id="devicesBtn">设备备注</button>
+      <button class="btn btn-sm" id="refreshBtn">刷新</button>
+    </div>
+    <div class="card-body">
+      <div class="toolbar">
+        <input type="search" id="searchInput" placeholder="搜索内容或设备名…" autocomplete="off">
+        <select id="deviceFilter" title="按发送设备筛选"></select>
+        <button class="btn btn-sm" id="selectBtn">多选</button>
+      </div>
+
+      <div class="bulkbar" id="bulkBar" hidden>
+        <label class="bulk-all">
+          <input type="checkbox" id="selectAll">
+          <span>全选</span>
+        </label>
+        <span id="selCount">已选 0 条</span>
+        <span class="spacer"></span>
+        <button class="btn btn-sm" id="bulkCancel">取消</button>
+        <button class="btn btn-sm btn-danger" id="bulkDelete">删除选中</button>
+      </div>
+
+      <div class="textlist" id="textList"></div>
+      <!-- 空状态**首帧不能显示**：数据还没回来，这时候说"还没有文本"是在报一个
+           还不知道真假的结论——真有文本的话，用户就会先看到这句、再看着它被
+           替换成列表。宁可先空着，等 renderTexts() 拿到数据再决定说不说。
+           （同理见 index.html 的 #fileEmpty。） -->
+      <div class="empty" id="textEmpty" hidden>还没有文本，发一条试试</div>
+    </div>
+  </section>
+
+</main>
+
+<!-- 设备备注面板 -->
+<div class="overlay" id="devOverlay" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="devTitle">
+    <div class="sheet-head">
+      <h3 id="devTitle">设备备注</h3>
+      <button class="icon-btn" id="devClose" title="关闭">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="sheet-body">
+      <div class="hint">
+        设备按发起请求的地址区分（服务端从连接上推导），不认 UA——两台同型号的手机
+        解析出来的名字一样，但仍是两台设备。改完备注，文本列表里显示的就是这个名字；
+        留空则恢复成系统解析出来的名字。
+      </div>
+      <div class="devlist" id="devList"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<script src="/live.js"></script>
+<script src="/settings.js"></script>
+<script src="/text.js"></script>
+</body>
+</html>

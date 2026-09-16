@@ -1,0 +1,37 @@
+# 构建上下文里不需要的东西。少了这个，COPY . . 会把本地的
+# 编译产物和测试数据一起塞进镜像层，构建又慢又占地方。
+
+# 版本控制与编辑器
+.git
+.gitignore
+.gitattributes
+
+# GitHub Actions 的工作流：镜像里用不到
+.github
+
+# 运行时数据（文件本体、分片、SQLite、背景图）
+data/
+
+# 编译产物
+dist/
+quickshare
+quickshare.exe
+
+# 本地临时目录：端到端测试数据、截图、浏览器配置，动辄上百 MB
+.tmp/
+
+# 工作区元数据
+.workbuddy-ai/
+
+# 文档与本地脚本，镜像里用不到
+*.md
+Dockerfile
+docker-compose.yml
+Makefile
+e2e.sh
+pack.py
+
+# 源码快照（pack.py 的派生产物）。它每次重新打包内容都会变，
+# 放进去会让 COPY . . 这层缓存白白失效、连带触发重新编译。
+go.zip
+internal.zip

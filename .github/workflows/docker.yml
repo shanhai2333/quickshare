@@ -1,0 +1,106 @@
+name: Docker
+
+# 两种触发，走两个不同的 job：
+#   - 推分支 / 开 PR：只**编译**一遍 Dockerfile，不推送、不需要任何密钥。
+#     存在的意义是让 Dockerfile（尤其是版本注入那几行 ARG）一直保持可用——
+#     只在发版那天才碰它的话，一个笔误要等到发版才暴露。
+#   - 打 tag：构建多架构镜像并推到 Docker Hub。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 编译验证（不推送）
+    # tag 走下面的 publish，这里跳过
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            VERSION=0.0.0-check
+            COMMIT=${{ github.sha }}
+            REPO=${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: 推送到 Docker Hub
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 先检查密钥，别等到最后一步才报一句看不懂的错。
+      # 这两个要在仓库的 Settings → Secrets and variables → Actions 里建，
+      # DOCKERHUB_TOKEN 用 Docker Hub 的 Access Token，不要用账号密码。
+      - name: 检查密钥
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${DOCKERHUB_USERNAME}" ] || missing="${missing} DOCKERHUB_USERNAME"
+          [ -n "${DOCKERHUB_TOKEN}" ] || missing="${missing} DOCKERHUB_TOKEN"
+          if [ -n "${missing}" ]; then
+            echo "::error::缺少仓库 Secret：${missing}。设置方法见 README 的「自动发布」一节。"
+            exit 1
+          fi
+
+      - name: 取版本号
+        id: ver
+        run: |
+          set -euo pipefail
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # armv7 的镜像必须在 x86 的 runner 上模拟构建，没 QEMU 编不出来
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 从 tag 推出镜像标签：v1.2.3 → 1.2.3、1.2、latest
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/quickshare
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # 和 release.yml 的四个平台对齐（armv7 是不少老 NAS 的架构）
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.ver.outputs.date }}
+            REPO=${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

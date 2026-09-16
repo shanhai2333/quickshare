@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuickShare · 内网文件分享</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6fed'/%3E%3Cpath d='M16 8v12m0 0l-5-5m5 5l5-5M9 23h14' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 20h14"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-name">QuickShare</div>
+        <div class="brand-sub">内网文件分享</div>
+      </div>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="stats" id="stats"></div>
+    <div class="topbar-actions">
+      <a class="icon-btn" href="/text" title="发送文本 · 不用登录聊天软件">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+      </a>
+      <button class="icon-btn" id="pageLinkBtn" title="复制本页网址 / 悬停出二维码">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="themeBtn" title="切换浅色 / 深色"></button>
+      <button class="icon-btn" id="settingsBtn" title="设置">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 008 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 003.68 15a1.65 1.65 0 00-1.51-1H2a2 2 0 110-4h.09A1.65 1.65 0 003.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.68h.08A1.65 1.65 0 0010 3.17V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.32 9v.08a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="card" id="authCard" hidden>
+    <div class="card-body">
+      <p class="muted auth-hint">本服务已开启访问口令，请输入后使用。</p>
+      <div class="pwd-row">
+        <input type="password" id="authInput" placeholder="请输入口令" autocomplete="current-password">
+        <button class="btn btn-primary" id="authBtn">进入</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="uploadCard">
+    <div class="card-body">
+      <div class="dropzone" id="dropzone">
+        <div class="dz-icon">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 16V4m0 0L8 8m4-4l4 4M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>
+          </svg>
+        </div>
+        <div class="dz-title">把文件拖到这里，或点击选择</div>
+        <div class="dz-hint">支持多选、大文件分片上传与断点续传</div>
+      </div>
+      <input type="file" id="fileInput" multiple hidden>
+      <div class="queue" id="queue"></div>
+    </div>
+  </section>
+
+  <section class="card" id="filesCard">
+    <div class="card-head">
+      <h2>文件列表</h2>
+      <span class="count" id="fileCount">0</span>
+      <span class="spacer"></span>
+      <span class="muted" id="chunkHint"></span>
+      <button class="btn btn-sm" id="refreshBtn">刷新</button>
+    </div>
+    <div class="card-body no-pad">
+      <table>
+        <thead>
+          <tr>
+            <th>文件名</th>
+            <th class="col-hide-sm">大小</th>
+            <th class="col-hide-sm">上传时间</th>
+            <th class="col-actions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="fileRows"></tbody>
+      </table>
+      <!-- 空状态**首帧不能显示**：数据还没回来就说"还没有文件"是在报一个还不知道
+           真假的结论，有文件时会先闪一下这句再被列表替掉。等 renderFiles() 拿到
+           数据再决定说不说。（同理见 text.html 的 #textEmpty。） -->
+      <div class="empty" id="fileEmpty" hidden>还没有文件，先上传一个吧</div>
+    </div>
+  </section>
+
+</main>
+
+<!-- 二维码浮层。位置由 JS 算，样式里给 pointer-events:none ——
+     否则鼠标"移到浮层上"会被当成离开按钮，浮层闪个不停。 -->
+<div class="qr-pop" id="qrPop" hidden>
+  <img id="qrImg" alt="扫码打开" width="200" height="200">
+</div>
+
+<div id="toasts"></div>
+<script src="/live.js"></script>
+<script src="/settings.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
