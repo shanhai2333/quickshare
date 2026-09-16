@@ -25,17 +25,21 @@
     <div class="topbar-spacer"></div>
     <div class="stats" id="stats"></div>
     <div class="topbar-actions">
-      <a class="icon-btn" href="/text" title="发送文本 · 不用登录聊天软件">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        </svg>
-      </a>
       <button class="icon-btn" id="pageLinkBtn" title="复制本页网址 / 悬停出二维码">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
           <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
         </svg>
       </button>
+      <!-- 「发文本」**必须排在链接按钮之后**：这样它从右数是第 3 个，而文本页的
+           「返回文件页」也是从右数第 3 个——两页同一个 x 坐标，来回切不用挪鼠标。
+           两个页面的动作区都是右对齐的，所以对齐看的是**从右数第几个**，不是第几个。
+           **别调这两个按钮的相对顺序**，一调这个对齐就没了。 -->
+      <a class="icon-btn" href="/text" title="发送文本 · 不用登录聊天软件">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+      </a>
       <button class="icon-btn" id="themeBtn" title="切换浅色 / 深色"></button>
       <button class="icon-btn" id="settingsBtn" title="设置">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
