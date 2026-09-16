@@ -51,7 +51,7 @@ services:
       #   github   —— 默认。查 GitHub 的 releases/latest。
       #   dockerhub —— 查 Docker Hub 的 tag 列表。**GitHub 仓库是私有的就用这个**：
       #                未认证请求查私有仓库一律 404，更新检查会永远查不到东西。
-      QS_UPDATE_SOURCE: "github"
+      QS_UPDATE_SOURCE: "dockerhub"
 
       # 检查哪个仓库，"owner/name"，**属于上面那个源**。
       #   github 源下留空 = 用构建时注入的那个（正式发布的镜像里已经注好了）。
@@ -60,7 +60,7 @@ services:
       #   放到 Docker Hub 命名空间下一定查不到）。
       # 用 dockerhub 时把下面这行换成你自己的，例如：
       #   QS_UPDATE_REPO: "你的DockerHub用户名/quickshare"
-      QS_UPDATE_REPO: ""
+      QS_UPDATE_REPO: "shanhaijun/quickshare"
 
     # 让容器以 NAS 上的目标用户身份运行，避免数据目录权限问题。
     # 在 .env 里设置 PUID / PGID（群晖常见 1026，威联通常见 1000）
