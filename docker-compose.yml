@@ -11,7 +11,7 @@ services:
     # （把 <用户名> 换成 Docker Hub 用户名，tag 用 1.0.0 / 1.0 / latest 都行）：
     #   image: <用户名>/quickshare:latest
     build: .
-    image: quickshare:latest
+    image: shanhaijun/quickshare:latest
     container_name: quickshare
     restart: unless-stopped
 
