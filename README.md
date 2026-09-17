@@ -1274,3 +1274,9 @@ Docker 部署必然是这种状态——容器里能看到的只有映射进去�
   请求会莫名其妙地读到旧数据。切换期间另有一个 `switching` 标志把请求挡成 503，
   避免请求落进"库已经关了、新库还没开"的窗口里。
 
+## 许可证
+
+[MIT](LICENSE)。`Dockerfile` 里那个 OCI label（`org.opencontainers.image.licenses`）标的
+是同一个协议，**改协议时两边要一起改**——label 是给镜像仓库和扫描工具看的，LICENSE 是给
+人看的，写着不一样比不写更糟。
+
