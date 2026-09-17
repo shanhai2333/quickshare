@@ -589,6 +589,15 @@ git push origin v1.0.0
 推完 tag 之后两个发布工作流会并行跑：一个出二进制，一个出镜像。
 镜像会打三个标签：`1.0.0`、`1.0`、`latest`。
 
+> **三个标签指向同一个镜像，不是三份。** 一次 `build-push-action` 把同一个 manifest list
+> 挂上三个名字，Docker Hub 按 digest 去重存层，所以空间和拉取开销都是 0 —— 在网页上看到
+> 几个 tag 的 digest 一模一样是正常的，不是推重了。三种写法各有用途：`1.0.0` 精确钉死，
+> `1.0` 跟着 1.0.x 的补丁走，`latest` 图省事。
+>
+> 注意 **`latest` 是"最后推上去的那个"，不是"版本最高的那个"**。哪天给旧分支补个
+> `v1.0.1`，`latest` 会**倒退**回 `1.0.1`。介意的话把 `docker.yml` 里
+> `type=raw,value=latest` 那行去掉，或换成 `type=semver,pattern={{major}}`（只在 2.0 时动）。
+
 > **工作流文件是按「触发它的那个 ref」取的。** tag 触发的运行，用的是**那个 tag 指向的提交**里的
 > `release.yml`（不是 `main` 上最新的）。所以修完工作流之后，**光把修复推到 `main` 不会有任何
 > 变化**，**在 Actions 页面点 "Re-run" 也还是跑旧的**——这一点最反直觉。要重发得把 tag 挪过去：
@@ -743,12 +752,12 @@ data/
 | `GET` | `/text` | 文本页。同样在 HTML 里注入主题与资源版本号；**没设口令时还会把输入框/列表上的 `hidden` 摘掉**，让首帧就有内容（见「关于切页观感」） |
 | `GET` | `/api/config` | 服务配置：分片大小、是否需要口令、**当前版本号**（构建时注入的） |
 | `GET` | `/api/settings` | 外观设置。公开，因为首帧就要套上主题 |
-| `GET` | `/api/version` | 版本与更新状态。**立刻返回缓存**，同时在后台去问 GitHub；第一次会是 `checking: true`、`latest` 为空。版本号不敏感，没设口令的部署同样该看到更新提示 |
+| `GET` | `/api/version` | 版本与更新状态。**立刻返回缓存**，同时在后台去问配置的那个源（GitHub Releases 或 Docker Hub 的 tag 列表，见「网页端怎么检测更新」）；第一次会是 `checking: true`、`latest` 为空。`enabled` 表示"有没有配更新检查"，`latest` 为空时要靠它区分"没配"和"配了但读不到"。版本号不敏感，没设口令的部署同样该看到更新提示 |
 | `GET` | `/api/background` | 背景图。URL 带内容哈希，可长缓存 |
 | `GET` | `/f/{id}/{name}` | 下载。支持 Range；`?dl=1` 强制下载而非预览。`/f/{id}`（不带文件名）同样可用——**`{name}` 服务端根本不读**，只是让链接末尾带上真实扩展名，浏览器和用户看着清楚 |
 | `GET` | `/api/qr?d=<内容>` | 把 `d` 的内容画成二维码 PNG。内容完全由调用方给，服务端不读自己的任何数据，故不需要口令 |
 
-`/style.css`、`/app.js`、`/live.js`、`/text.js` 带 `?v=<内容哈希>` 时返回
+`/style.css`、`/app.js`、`/live.js`、`/text.js`、`/settings.js` 带 `?v=<内容哈希>` 时返回
 `Cache-Control: immutable`，不带时要求重新校验。版本号在启动时按内嵌资源内容算出，
 改前端不用手动改版本。两个页面共用同一个版本号。
 
@@ -828,14 +837,14 @@ data/
 │   │   └── texts_test.go       # 文本 CRUD、排序稳定性、upsert 不覆盖备注、批量删除与清理
 │   ├── version/
 │   │   ├── version.go          # 版本信息的唯一来源（四个变量由构建时注入）+ 语义化比较
-│   │   └── version_test.go     # 版本比较的单元测试（含"认不出来一律当相等"那一组）
+│   │   └── version_test.go     # 版本比较的单元测试（含"认不出来一律当相等"、以及三段式判断那两组）
 │   └── server/
 │       ├── server.go           # 路由、鉴权、列表接口、静态资源缓存、后端热切换、清理循环
 │       ├── events.go           # 变更推送：SSE 长连接 + 按主题分发的广播中心
 │       ├── events_test.go      # 广播中心的单元测试（含"不同主题不被合并"）
 │       ├── asset_test.go       # 资源版本号的单元测试
-│       ├── update.go           # 更新检查：查 GitHub Releases，带缓存、永不阻塞
-│       ├── update_test.go      # 更新检查的单元测试（假 GitHub API，逐条钉住那些取舍）
+│       ├── update.go           # 更新检查：查 GitHub Releases 或 Docker Hub 的 tag 列表，带缓存、永不阻塞
+│       ├── update_test.go      # 更新检查的单元测试（假 GitHub / 假 Docker Hub，逐条钉住那些取舍）
 │       ├── upload.go           # 分片上传与合并
 │       ├── download.go         # 支持 Range 的下载 + 预览白名单（inline / sandbox / attachment）
 │       ├── qr.go               # 二维码 PNG 生成（尺寸随内容模块数动态算，短链优先）
