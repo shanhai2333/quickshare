@@ -11,6 +11,12 @@ const state = {
   config: null,
   files: [],
   token: localStorage.getItem('qs_token') || '',
+
+  // 文件列表的搜索与排序**全在前端做**（理由见下面 visibleFiles 的注释）。
+  // query 是"这一次的临时筛选"，sort 是"用户偏好"（存 localStorage）。
+  // sort 的真实初值在 bind() 里从 <select> 读——那里才知道用户上次选的是什么。
+  query: '',
+  sort: 'time-desc',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -160,15 +166,66 @@ function pageURL() {
   return location.origin + '/';
 }
 
+/* ------------------------------------------------------------ 搜索与排序 */
+
+// 搜索与排序**全在前端做**：`/api/files` 本来就是一次给全量，列表已经在内存里了，
+// 本地过滤零延迟，也不用每敲一个字就发一次请求。跟文本页是同一套做法——所以
+// `ListFiles()` 刻意不加查询参数，真到了列表大到必须分页的规模再说。
+//
+// 每个比较器都从**原始顺序**出发（`state.files` 是服务端给的"新→旧"，同秒的按
+// rowid 倒序兜底），而不是在上一次排序的结果上再排：`Array.prototype.sort` 在
+// 现代引擎里是稳定的，于是比较器没覆盖到的那一段自然保留服务端的顺序，不会出现
+// 每次刷新顺序都在变的抖动。
+//
+// 键必须和 index.html 里 <select id="fileSort"> 的 option value 一一对应。
+const SORTS = {
+  'time-desc': { cmp: (a, b) => b.createdAt - a.createdAt },
+  // 升序先整体倒过来再稳定排序。服务端同秒的行是按 rowid 倒序给的，倒过来之后
+  // 同秒的变成正序——这才是"旧→新"该有的样子。不这么做的话，同秒那几条在两个
+  // 方向下顺序一模一样，看着像排序没生效。（一次拖 5 个文件上传，它们几乎必然
+  // 落在同一秒里，这不是理论问题。）
+  'time-asc': { cmp: (a, b) => a.createdAt - b.createdAt, rev: true },
+  'name-asc': { cmp: (a, b) => NAME_COLLATOR.compare(a.name, b.name) },
+  'name-desc': { cmp: (a, b) => NAME_COLLATOR.compare(b.name, a.name) },
+  'size-desc': { cmp: (a, b) => b.size - a.size },
+  'size-asc': { cmp: (a, b) => a.size - b.size },
+};
+
+// 按中文习惯排（拼音序）。numeric 让「第2章」排在「第10章」前面——纯字符串比较
+// 会把 10 排到 2 前面；sensitivity:'base' 让大小写不敏感，跟搜索框的语义一致。
+const NAME_COLLATOR = new Intl.Collator('zh', { numeric: true, sensitivity: 'base' });
+
+// 当前搜索 / 排序条件下要显示的文件。
+function visibleFiles() {
+  const q = state.query.trim().toLowerCase();
+  const list = state.files.filter((f) => !q || f.name.toLowerCase().includes(q));
+  const s = SORTS[state.sort] || SORTS['time-desc'];
+  return s.rev ? list.reverse().sort(s.cmp) : list.sort(s.cmp);
+}
+
 function renderFiles() {
   const tbody = $('fileRows');
-  $('fileCount').textContent = state.files.length;
+  const list = visibleFiles();
+
+  // 计数：没筛过就是总数；筛过之后写成「命中 / 总数」——只报总数会让人以为屏幕上
+  // 这几行就是全部。（文本页那边只报总数，是因为它不做排序，这里信息量不一样。）
+  $('fileCount').textContent = list.length === state.files.length
+    ? String(state.files.length)
+    : `${list.length} / ${state.files.length}`;
+
+  // 空状态要分清"一个文件都没有"和"被筛掉了"——后者写成"还没有文件"会让用户以为
+  // 自己的东西丢了。（同 text.js 的 #textEmpty。）
+  //
   // 用 hidden 而不是 style.display：HTML 里 #fileEmpty 默认 hidden（首帧不能报
   // 一个还不知道真假的结论），而样式表里的 `[hidden] { display: none !important }`
-  // 会压过行内样式——两边混用的话它永远显示不出来。同 text.js 的 #textEmpty。
-  $('fileEmpty').hidden = state.files.length > 0;
+  // 会压过行内样式——两边混用的话它永远显示不出来。
+  const empty = $('fileEmpty');
+  empty.hidden = list.length > 0;
+  if (!empty.hidden) {
+    empty.textContent = state.files.length ? '没有匹配的文件' : '还没有文件，先上传一个吧';
+  }
 
-  tbody.innerHTML = state.files.map((f) => {
+  tbody.innerHTML = list.map((f) => {
     const url = esc(f.url);
     const share = esc(shareURL(f));
     return `
@@ -479,6 +536,28 @@ function bind() {
   });
 
   $('refreshBtn').addEventListener('click', refreshAll);
+
+  // ---- 搜索与排序
+  //
+  // 排序方式是**用户偏好**（下次打开还该是这个顺序），搜索词是**这一次的临时筛选**，
+  // 所以只把排序存进 localStorage。
+  const sortSel = $('fileSort');
+  const savedSort = localStorage.getItem('qs_file_sort');
+  // 存的值可能来自旧版本、也可能被人手改过。**必须校验**：给 select 赋一个不存在的
+  // value 会让它自己变回空串，之后 state.sort 就是空的、排序静默失效（而不是报错）。
+  if (savedSort && SORTS[savedSort]) sortSel.value = savedSort;
+  state.sort = sortSel.value;
+
+  sortSel.addEventListener('change', () => {
+    state.sort = sortSel.value;
+    localStorage.setItem('qs_file_sort', state.sort);
+    renderFiles();
+  });
+
+  $('fileSearch').addEventListener('input', () => {
+    state.query = $('fileSearch').value;
+    renderFiles();
+  });
 
   // ---- 链接复制与二维码
 

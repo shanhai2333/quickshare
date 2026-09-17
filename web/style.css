@@ -857,8 +857,15 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 .toolbar select { flex: none; max-width: 42%; }
 .toolbar .btn { flex: none; }
 
+/* 文件列表的工具条嵌在 .card-body.no-pad 里（表格要通栏、悬停要高亮到边），
+   没有 .card-body 的内边距兜着，左右得自己补。上面 14px 跟 .card-head 的纵向
+   节奏对齐；下面不补——.toolbar 自带的 12px 就是表格上方要的空隙。 */
+#fileToolbar { padding: 14px 18px 0; }
+
 #searchInput,
 #deviceFilter,
+#fileSearch,
+#fileSort,
 #ttlValue,
 #ttlUnit {
   padding: 6px 10px;
@@ -872,6 +879,8 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 
 #searchInput:focus,
 #deviceFilter:focus,
+#fileSearch:focus,
+#fileSort:focus,
 #ttlValue:focus,
 #ttlUnit:focus {
   outline: none;
@@ -880,7 +889,7 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-#deviceFilter, #ttlUnit { cursor: pointer; }
+#deviceFilter, #fileSort, #ttlUnit { cursor: pointer; }
 
 /* 多选开关的激活态：跟 .seg-item.active 一个思路，选中要看得出来。
    文字用 --text-2 而不是 --accent：accent 压在 accent-soft 上，

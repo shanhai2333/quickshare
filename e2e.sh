@@ -913,6 +913,17 @@ case "$HOME_PAGE" in
   *) bad "首页 #fileEmpty 没有 hidden — 有文件时会先闪一下这句话" ;;
 esac
 
+# 文件列表的搜索 / 排序工具条。纯前端实现，后端没有对应接口——这两条只防"某次重构把
+# 工具条整个删掉"，行为断言（六种排序、搜索、持久化、窄屏）在 .tmp/shots/verify-file-list.mjs。
+case "$HOME_PAGE" in
+  *'id="fileSearch"'*) ok "首页有文件名搜索框" ;;
+  *) bad "首页 #fileSearch 不见了" ;;
+esac
+case "$HOME_PAGE" in
+  *'id="fileSort"'*) ok "首页有排序下拉" ;;
+  *) bad "首页 #fileSort 不见了" ;;
+esac
+
 # 跨文档换页的动效靠样式表里那条 @view-transition（CSSOM 层面的验证在
 # .tmp/shots/probe-nav-flash.mjs 里，这里只做一次廉价的兜底）。
 STYLE_CSS=$(curl -s "$B/style.css")

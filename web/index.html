@@ -88,6 +88,20 @@
       <button class="btn btn-sm" id="refreshBtn">刷新</button>
     </div>
     <div class="card-body no-pad">
+      <!-- 搜索 + 排序工具条。和文本页的 .toolbar 同一套样式，但这一层是 no-pad
+           （表格要通栏、悬停要高亮到边），所以左右内边距由 #fileToolbar 自己补。
+           排序的 option value 必须和 app.js 里 SORTS 的键一一对应，加一项要两边都改。 -->
+      <div class="toolbar" id="fileToolbar">
+        <input type="search" id="fileSearch" placeholder="搜索文件名…" autocomplete="off">
+        <select id="fileSort" title="排序方式">
+          <option value="time-desc">上传时间（新→旧）</option>
+          <option value="time-asc">上传时间（旧→新）</option>
+          <option value="name-asc">文件名（A→Z）</option>
+          <option value="name-desc">文件名（Z→A）</option>
+          <option value="size-desc">大小（大→小）</option>
+          <option value="size-asc">大小（小→大）</option>
+        </select>
+      </div>
       <table>
         <thead>
           <tr>
