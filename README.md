@@ -885,6 +885,7 @@ data/
 ├── docker-compose.yml
 ├── .dockerignore               # 别把 dist/ 和 .tmp/ 塞进构建上下文
 ├── .gitattributes              # 换行符统一钉成 LF（见下）
+├── LICENSE                     # MIT，与 Dockerfile 里的 OCI label 保持一致
 ├── .github/workflows/
 │   ├── ci.yml                  # 每个分支与 PR：格式 + vet + 单测 + e2e + 交叉编译
 │   ├── release.yml             # 打 v* tag：编四个平台 → 发 Release
