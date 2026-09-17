@@ -819,7 +819,7 @@ data/
 ```
 .
 ├── main.go                     # 入口：配置、启动、优雅关闭、托盘接线
-├── main_test.go                # localURLOf / portOf / envBool 的单元测试
+├── main_test.go                # localURLOf / portOf / envBool / updateTarget 的单元测试
 ├── config.go                   # 启动配置（数据目录位置），存在数据目录之外
 ├── internal/
 │   ├── desktop/
@@ -961,7 +961,11 @@ go test ./...
   **注意它带 `//go:build !windows`，在 Windows 开发机上不参与编译**，
   本机跑 `go test ./...` 是看不到它的（改 stub 时要意识到这条没被验证）
 - `main_test.go`：`localURLOf`（绑定具体 IP 时**不能**退回 `localhost`，否则托盘的
-  「打开页面」连不上）、`portOf`、`envBool`（大小写、两侧空白、非法值退回默认）
+  「打开页面」连不上）、`portOf`、`envBool`（大小写、两侧空白、非法值退回默认）、
+  `updateTarget`（**"查哪个源"的决策点，出错是静默的**——源选错只会表现为"永远没有
+  新版本提示"，没有任何报错。重点是两条：`QS_UPDATE_CHECK=0` 时源和仓库配了也不检查；
+  **`dockerhub` 源没给 `QS_UPDATE_REPO` 时必须主动关掉、不能回落到注入的 GitHub 仓库名**
+  ——回落的后果是拿 GitHub 仓库名去 Docker Hub 查，必然 404 且看不出原因）
 
 端到端冒烟测试 `e2e.sh` 覆盖 249 项断言：分片上传、断点续传、分片截断拦截、分片越界拦截
 （声明 0 字节的任务不得接收任何分片）、路径穿越防护、Range 下载内容比对（sha256）、

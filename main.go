@@ -270,6 +270,10 @@ func lanIPs() []string {
 // 默认问 GitHub，仓库取构建时注入的 ${{ github.repository }}。**本地构建注入的是
 // 空串，也就是不检查** —— 自己编的二进制不该去问远端有没有新版本。
 //
+// 返回的 (source, repo) 里 **repo 为空就是不检查**（此时 source 仍会返回默认源，
+// 无意义）。判据是 repo 而不是 source：`newUpdateChecker` 在 repo 为空时会在发请求
+// 之前短路，`/api/version` 也如实回 `enabled: false`。
+//
 //	QS_UPDATE_SOURCE  问哪个源：github（默认）或 dockerhub
 //	QS_UPDATE_REPO    那个源里的 "owner/name"；不设则用注入的 GitHub 仓库
 //	QS_UPDATE_CHECK=0 整个关掉——内网完全不出网的环境里，开着它只会让每次打开
