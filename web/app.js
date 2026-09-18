@@ -579,6 +579,36 @@ function addToQueue(file) {
   runQueue();
 }
 
+// 给粘贴来的文件改名。
+//
+// 剪贴板里的图片**一律叫 `image.png`**（浏览器给的默认名），连着粘两张就重名了——
+// 而服务端有「同名且未完成的上传任务即续传」的逻辑（`upload.go`），第二张会被当成
+// 第一张的续传，结果只剩一张图。
+//
+// 名字取 `粘贴-20260916-205127.png`；同一秒里的第二张起加序号（`-2`、`-3`），
+// 跟系统给重名文件加序号是一个意思。**时间戳只到秒，那个序号就是这套改名唯一的存在
+// 理由**——"粘一张、隔半秒再粘一张"算出来是同一个名字，不兜住就又撞上了。
+//
+// 序号按**时间戳**计数、和扩展名无关：同一秒里粘了 png 又粘 jpg，也是接着往下排。
+const pastedCount = new Map(); // 时间戳 -> 这一秒里已经发出去几个
+
+function renamePasted(file) {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+    + `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const n = (pastedCount.get(stamp) || 0) + 1;
+  pastedCount.set(stamp, n);
+  // 扩展名从原名里取。Firefox 有时候给的是没有扩展名的 `blob`，按 png 算——
+  // 剪贴板里能拿到的基本就是截图。
+  const m = /\.([a-z0-9]{1,5})$/i.exec(file.name || '');
+  const ext = m ? m[1].toLowerCase() : 'png';
+  return new File([file], `粘贴-${stamp}${n > 1 ? `-${n}` : ''}.${ext}`, {
+    type: file.type || '',
+    lastModified: file.lastModified,
+  });
+}
+
 let running = 0;
 
 function runQueue() {
@@ -762,6 +792,31 @@ function bind() {
     if (e.dataTransfer && e.dataTransfer.files.length) {
       for (const f of e.dataTransfer.files) addToQueue(f);
     }
+  });
+
+  // 整页粘贴也接收。
+  //
+  // 内网分享里最高频的动作是"截个图发给你看"，而截图默认就落在剪贴板里——
+  // 不该逼用户先存成文件再拖进来。
+  //
+  // **只在剪贴板里真有文件时才接管，没有文件就原样放过去**——所以"往搜索框里粘一段
+  // 文字"不受任何影响（那段文字照样进搜索框）。也正因为这样，这里**不需要**再判断
+  // 焦点在不在输入框：输入框本来就不接受文件，拦下来只会让"刚搜完顺手粘张图"
+  // 变成什么都没发生。
+  document.addEventListener('paste', (e) => {
+    const dt = e.clipboardData;
+    if (!dt) return;
+
+    const picked = [];
+    for (const it of dt.items || []) {
+      if (it.kind !== 'file') continue;
+      const f = it.getAsFile();
+      if (f) picked.push(f);
+    }
+    if (!picked.length) return; // 没有文件，交给浏览器自己处理
+
+    e.preventDefault();
+    picked.forEach((f) => addToQueue(renamePasted(f)));
   });
 
   $('refreshBtn').addEventListener('click', refreshAll);

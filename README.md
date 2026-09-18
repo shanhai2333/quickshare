@@ -15,7 +15,8 @@
 
 ## 功能
 
-- **上传**：拖拽或点选，支持多选。大文件自动分片，中断后重传会自动续传
+- **上传**：拖拽或点选，支持多选。**截图可以直接按 `Ctrl+V` 粘进来**（不用先存成文件）。
+  大文件自动分片，中断后重传会自动续传
 - **列表**：文件名、大小、上传时间；点文件名直接在浏览器里打开（图片 / 视频 / PDF / 文本，见下方白名单）
 - **预览**：图片、音频、视频、PDF、文本不用离开列表就能看 / 听 / 播——每行一枚预览按钮，
   点开在当前页面上盖一层预览层，可在**当前列表里**用「上一个 / 下一个」逐个翻（键盘 `←` `→`
@@ -614,22 +615,56 @@ scp dist/quickshare-linux-amd64 nas:/volume1/quickshare/
 ssh nas 'cd /volume1/quickshare && chmod +x quickshare-linux-amd64 && ./quickshare-linux-amd64'
 ```
 
-开机自启用 NAS 的计划任务，或写个 systemd unit：
+开机自启见下面的「方式三」。
 
-```ini
-[Unit]
-Description=QuickShare
-After=network.target
+---
 
-[Service]
-WorkingDirectory=/volume1/quickshare
-ExecStart=/volume1/quickshare/quickshare -addr :8080 -data /volume1/quickshare/data
-Restart=always
-User=your-user
+### 方式三：开机自启（systemd / OpenWrt procd）
 
-[Install]
-WantedBy=multi-user.target
+仓库里 `deploy/` 下有两个可以直接用的模板：
+
+| 文件 | 装到哪 | 用在哪 |
+|---|---|---|
+| `deploy/quickshare.service` | `/etc/systemd/system/quickshare.service` | 标准 Linux（Debian / Ubuntu / 群晖 DSM 7 等） |
+| `deploy/quickshare.init` | `/etc/init.d/quickshare` | OpenWrt（路由器上没有 systemd） |
+| `deploy/quickshare.config` | `/etc/config/quickshare` | OpenWrt 的 UCI 配置：监听地址、数据目录、口令 |
+
+systemd 那边：
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin quickshare
+sudo install -d -o quickshare -g quickshare /opt/quickshare /var/lib/quickshare
+sudo install -m 755 dist/quickshare-linux-amd64 /opt/quickshare/quickshare
+sudo install -m 644 deploy/quickshare.service /etc/systemd/system/quickshare.service
+sudo systemctl daemon-reload && sudo systemctl enable --now quickshare
 ```
+
+OpenWrt 那边：
+
+```bash
+scp dist/quickshare-linux-armv7 root@router:/usr/bin/quickshare
+scp deploy/quickshare.init     root@router:/etc/init.d/quickshare
+scp deploy/quickshare.config   root@router:/etc/config/quickshare
+ssh root@router 'chmod +x /etc/init.d/quickshare && /etc/init.d/quickshare enable && /etc/init.d/quickshare start'
+```
+
+模板里有三件事是**刻意这么写的**，改之前先看一眼：
+
+- **`After=network-online.target`，不是 `network.target`。** 服务从连接推导设备身份
+  （文本页按来源 IP 区分是谁发的），而推导要用本机网卡地址表——开机自启时网卡可能还
+  没拿到地址。程序里的地址表缓存会自愈（不是 `sync.Once`），所以晚一点也能纠正回来；
+  但**早到的那几个请求会被算成另一台设备**，文本页的设备列表里就多出一台，看着像 bug。
+  多等这几秒，是为了让"第一次就是对的"。
+- **`-data` 必须显式给。** 不给的话是相对工作目录的 `./data`，而服务的工作目录由
+  systemd / procd 决定——换个启动方式数据就"不见了"。显式指定之后网页上的
+  「[文件存储位置](#关于存储位置)」会变成只读，这是对的：位置该由部署方式决定。
+- **数据目录别放在 overlay 上**（OpenWrt 的 `/`、群晖的系统分区）。几部电影就能把分区
+  写满，而这类分区写满的后果不只是这个服务挂掉。指到外置盘上。
+
+> 那两个自启模板**本机没法真跑**（这台开发机既没有 systemd 也没有 OpenWrt）。
+> 能验的是逻辑：`.tmp/check-procd.sh` 用桩函数把 procd 脚本跑一遍，断言 UCI 选项
+> 真的变成了命令行参数（含 `enabled=0` 时什么都不做、数据目录被建出来）。
+> 真机上的行为只能靠用户反馈。
 
 ---
 
@@ -645,6 +680,11 @@ WantedBy=multi-user.target
 2. 等进度条走完，文件出现在下面的「文件列表」里
 3. 点那一行的**链接按钮**（链条图标），直链已经复制到剪贴板了
 4. 把链接发出去，对方点开就能下
+
+**截了图不用先存成文件**：`Ctrl+V` 直接粘，截图就进上传队列了。粘进来的文件会自动起名成
+`粘贴-20260916-205127.png`（同一秒里的第二张起加 `-2`、`-3`）——剪贴板里的图片原本一律叫
+`image.png`，不改名的话第二张会被当成第一张的续传。**只有剪贴板里真有文件时才接管**，
+所以往搜索框里粘一段文字照常。
 
 **手机扫二维码更省事**：鼠标停在链接按钮上，二维码就弹出来。顶栏那个同款按钮出的是
 **当前页地址**的二维码——想让别人自己打开页面挑文件，用那个。
@@ -1034,7 +1074,7 @@ data/
 │       └── storage.go          # 数据目录切换与迁移
 ├── web/                        # 前端（go:embed 打进二进制）
 │   ├── index.html              # 首页：上传 + 文件列表（含搜索 / 排序工具条）
-│   ├── app.js                  # 首页逻辑：上传、列表渲染、搜索与排序、媒体预览、复制与二维码
+│   ├── app.js                  # 首页逻辑：上传（拖拽/点选/粘贴）、列表渲染、搜索与排序、媒体预览、复制与二维码
 │   ├── text.html               # 文本页：发送 + 工具条（搜索/筛选/多选）+ 文本列表
 │   ├── text.js                 # 文本页逻辑：列表渲染、搜索筛选、多选、复制、设备备注
 │   ├── settings.js             # 设置面板，两页共用（标记 + 事件 + 外观逻辑都在这里）
@@ -1042,6 +1082,10 @@ data/
 │   └── style.css               # 两个页面共用的样式与主题变量
 ├── Dockerfile
 ├── docker-compose.yml
+├── deploy/                     # 开机自启模板（systemd / OpenWrt procd）
+│   ├── quickshare.service      # systemd unit
+│   ├── quickshare.init         # OpenWrt 的 procd 脚本（UCI 驱动）
+│   └── quickshare.config       # OpenWrt 的 /etc/config/quickshare 样例
 ├── .dockerignore               # 别把 dist/ 和 .tmp/ 塞进构建上下文
 ├── .gitattributes              # 换行符统一钉成 LF（见下）
 ├── LICENSE                     # MIT，与 Dockerfile 里的 OCI label 保持一致
@@ -1327,6 +1371,12 @@ Docker 部署必然是这种状态——容器里能看到的只有映射进去�
 `.tiff` 基本没有浏览器认、`.flac` 在旧 Safari 上也不行。这时候点顶栏的「在新标签页打开」
 或「下载」——服务端按正确的内容类型发出去了，是浏览器自己解不了。
 
+**粘了张图，怎么没反应？**
+先确认剪贴板里真的是**图片文件**：有些截图工具（以及微信/QQ 的部分版本）放进剪贴板的是
+一段位图数据，浏览器这边拿不到文件，程序也就认不出来——存成文件再拖进来即可。
+另外**只有剪贴板里有文件时才会接管粘贴**，粘一段文字是原样放过去的（搜索框照常收到）。
+页面本身没有别的限制，`Ctrl+V` 在哪儿按都行。
+
 ---
 
 ## 技术选型说明
@@ -1486,6 +1536,22 @@ Docker 部署必然是这种状态——容器里能看到的只有映射进去�
   > 点——这个错误的表现是"点到的还是上一个文件"，很容易误判成翻页坏了。还有一条：素材名不能
   > 有包含关系，原先叫「大日志.txt」，而搜索是**子串匹配**，搜它会把「日志.txt」一起命中，
   > "只剩一个文件"那几条断言全错。
+  粘贴上传另有一个 `verify-paste.mjs`（39 项，配 `.tmp/run-paste.sh`）。它跟别的脚本不一样：
+  **现编一个二进制再跑**——`app.js` 是 `go:embed` 进去的，拿 `dist/` 里现成的产物验，验的还是
+  上一版代码。真正的难点是**怎么把二进制图片塞进剪贴板**：CDP 只能按键，真按 `Ctrl+V` 要动操作
+  系统的剪贴板，所以改成在页面里合成 `ClipboardEvent`（先探一下这个 Chrome 认不认 init 里的
+  `clipboardData`，不认就退回 `defineProperty` 造同形对象），派发的正是 `app.js` 那个监听器
+  看的东西。断言围绕**改名**展开：剪贴板图片一律叫 `image.png`，不改名的话第二张会被服务端当成
+  第一张的续传（同名未完成即续传），最后只剩一张——所以最要紧的一条是"一秒内连粘两张，
+  得到 2 个文件（不是 1 个）"。另有一条**命名不变量**：把名字按时间戳分组，同组里的序号必须是
+  1..k 一个不落、且不重复，它同时钉住"同秒不撞名"和"序号不跳号"。还有一条容易写错的：
+  粘纯文字**不该**被拦（搜索框里粘一段字不能被吃掉），所以断言 `defaultPrevented === false`。
+  > 首跑红 3 条，**全是断言写错、没有产品缺陷**：一是用 `/-\d+\.png$/` 去找带序号的，而这个
+  > 正则把 `粘贴-20260916-205127.png` 也算进去了（`-` 后面就是 6 位数字）——**"名字长得像"
+  > 的正则比写死的数字更脆**；二是原来的命名是"批量粘带 `-1`/`-2`、撞名再挂一个序号"，
+  > 两套序号叠起来会出现 `粘贴-…-2-2.png`，改成**按时间戳计数**（同一秒里第几个就是几），
+  > 一套序号管两件事；三是"上传队列已清空"——队列条目**传完 4 秒才移除**，断言那一刻可能还在、
+  > 也可能已经没了，改成断言"没有 `.qitem.err`"（失败的上传不会自动移除，红了就一定还在）。
   还有一个 `probe-nav-flash.mjs`（6 项）量**切页时主区空白多久**。它的关键手法是
   **用 CDP 往每个请求注入延迟**（`Network.emulateNetworkConditions`）模拟 NAS + WiFi——
   本机上服务端 10ms 内就回完了，五六个请求全挤在同一帧里，"先画空壳再填内容"这个过程
@@ -1506,10 +1572,11 @@ Docker 部署必然是这种状态——容器里能看到的只有映射进去�
   > 而文本页上还只看得见其中 3 行。现在改成**先按可见性过滤、行名从 `.field-label` 现取、
   > 两页各跑一遍**，行数不再写进脚本。凡是"面板里有 N 行"这种写法都会随功能增长而失效，
   > 而且失效时报的是"期望 3 实际 5"——**看着像样式坏了，其实只是数字旧了**。
-  需要外部先备好环境才能跑的脚本，前置都写在各自头部注释里，项目侧另配了三个编排脚本：
+  需要外部先备好环境才能跑的脚本，前置都写在各自头部注释里，项目侧另配了四个编排脚本：
   `run-ui-checks.sh`（串行跑多个前端脚本，每个之前把实例重置成"干净数据目录 + 深色主题"，
   并把实例绑到所有接口以便设备身份那套能跑；起停都在同一个脚本里——Bash 调用返回时
   该次调用中用 `&` 起的子进程会被一起收掉；**按退出码判成败**，有脚本红了就以非 0 退出）、
+  `run-paste.sh`（见上，跑之前先 `go build` 一个带最新前端的二进制）、
   `run-link-qr.sh`（`verify-link-qr.mjs` 把
   文件行数写死成 3，得先走上传接口把样本文件造出来；同样每轮一个全新目录、**并把
   `node` 的退出码透出来**——原先 `node ... 2>&1` 后面又 `kill_port` 又 `echo`，
@@ -1517,9 +1584,11 @@ Docker 部署必然是这种状态——容器里能看到的只有映射进去�
   （`xss.mjs` 要求实例**不开口令**且先传两个探针，缺了会报 `files.find is not a function`
   ——**这个报错指向接口，方向完全是错的**，所以前置必须写清楚；它每轮用一个全新的临时
   数据目录，因为 safe-delete 守卫是**按轮次累计**的，固定目录反复清空迟早会被拦）。
-  **三个编排脚本都栽过同一个跟头**：safe-delete 按轮次累计，删满 50 个文件后
+  **这几个编排脚本都栽过同一个跟头**：safe-delete 按轮次累计，删满 50 个文件后
   `rmtree` 被静默拒绝，实例带着上一次的数据起来——断言于是假绿或假红，而脚本毫无察觉。
   现在一律"每个脚本一个全新目录"，不需要删任何东西。
+  > 还有一条：写新编排脚本之前先 `ls .tmp/*.sh .tmp/*.py`。`.tmp/` 是 gitignore 的，
+  > 凭记忆写会**重复造一个早就在那儿的脚本**（`run_xss_verify.py` 就这么被重造过一次）。
 - **托盘直接调 Win32，不引第三方 GUI 库**：`golang.org/x/sys/windows` 本来就在依赖树里
   （modernc.org/sqlite 带进来的），直接用它调 `Shell_NotifyIcon` / `TrackPopupMenu`，
   省掉一个依赖，也省掉"这个库在 Linux 上要不要拖 gtk"这类问题。用 build tag 把实现挡在
