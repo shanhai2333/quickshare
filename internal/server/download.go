@@ -43,16 +43,18 @@ var sandboxInline = map[string]bool{
 	"image/svg+xml": true,
 }
 
-// previewModeOf 判断该类型用什么方式回吐。
-func previewModeOf(contentType string) previewMode {
-	// 去掉 charset 之类的参数再比对
+// normalizedMIME 去掉 charset 之类的参数、转小写，得到能直接比对的媒体类型。
+func normalizedMIME(contentType string) string {
 	mt := contentType
 	if parsed, _, err := mime.ParseMediaType(contentType); err == nil {
 		mt = parsed
 	}
-	mt = strings.ToLower(strings.TrimSpace(mt))
+	return strings.ToLower(strings.TrimSpace(mt))
+}
 
-	switch {
+// previewModeOf 判断该类型用什么方式回吐。
+func previewModeOf(contentType string) previewMode {
+	switch mt := normalizedMIME(contentType); {
 	case inlineSafe[mt]:
 		return modeInline
 	case sandboxInline[mt]:
@@ -60,6 +62,34 @@ func previewModeOf(contentType string) previewMode {
 	default:
 		return modeDownload
 	}
+}
+
+// previewKindOf 把类型归到前端预览层能用的那一类，归不进去返回空串。
+//
+// **它先问 previewModeOf，而不是另写一份类型清单。** 前端只在拿到非空值时才显示
+// 「预览」按钮，而那个按钮点下去必须真的能内联渲染——两份清单一旦漂了，表现是
+// "点预览直接触发下载"（或者更糟：把不该内联的类型放进预览）。
+// 所以这里只做"把白名单里的类型再分个组"，准入判断始终只有 previewModeOf 一处。
+//
+// 注意 `text/*` 这个前缀在这里是安全的：能走到这一步说明它已经在 inlineSafe 里了，
+// 而 `text/html` 不在（理由见上面 inlineSafe 的注释）。
+func previewKindOf(contentType string) string {
+	if previewModeOf(contentType) == modeDownload {
+		return ""
+	}
+	switch mt := normalizedMIME(contentType); {
+	case strings.HasPrefix(mt, "image/"):
+		return "image"
+	case strings.HasPrefix(mt, "video/"):
+		return "video"
+	case strings.HasPrefix(mt, "audio/"):
+		return "audio"
+	case mt == "application/pdf":
+		return "pdf"
+	case mt == "application/json", strings.HasPrefix(mt, "text/"):
+		return "text"
+	}
+	return ""
 }
 
 // handleDownload 按文件 ID 下载。

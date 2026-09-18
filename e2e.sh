@@ -1385,6 +1385,13 @@ chk "文件列表带 ttlSeconds" \
   "$(curl -s "$B/api/files" | "$PY" -c 'import sys,json;print("ttlSeconds" in json.load(sys.stdin)[0])')" "True"
 chk "文件列表带 expiresAt" \
   "$(curl -s "$B/api/files" | "$PY" -c 'import sys,json;print("expiresAt" in json.load(sys.stdin)[0])')" "True"
+# 前端只认这个字段来决定"要不要显示预览按钮"，不按 mime 前缀自己猜。
+# 取值必须落在五类或空串里：将来往白名单加了类型却忘了归类时，表现是
+# "有按钮但点开一片空白"或者"能内联却只能下载"，都不会报错——只有这条能拦住。
+chk "文件列表带 preview" \
+  "$(curl -s "$B/api/files" | "$PY" -c 'import sys,json;print("preview" in json.load(sys.stdin)[0])')" "True"
+chk "preview 取值合法（五类或空串）" \
+  "$(curl -s "$B/api/files" | "$PY" -c 'import sys,json;ok={"","image","video","audio","pdf","text"};print(all(f["preview"] in ok for f in json.load(sys.stdin)))')" "True"
 chk "文本列表带 isCode" \
   "$(curl -s "$B/api/texts" | "$PY" -c 'import sys,json;print("isCode" in json.load(sys.stdin)[0])')" "True"
 chk "文本列表带 expiresAt" \

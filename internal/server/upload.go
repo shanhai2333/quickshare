@@ -350,6 +350,8 @@ func fileDTO(f *store.File) map[string]any {
 	return map[string]any{
 		"id": f.ID, "name": f.Name, "size": f.Size,
 		"mime": f.Mime, "createdAt": f.CreatedAt.Unix(),
+		// 和 GET /api/files 保持同一个字段（前端两处都读它决定要不要给「预览」按钮）
+		"preview": previewKindOf(f.Mime),
 	}
 }
 

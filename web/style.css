@@ -568,6 +568,153 @@ input:focus {
   to { opacity: 1; transform: none; }
 }
 
+/* ---------------------------------------------------------- 媒体预览层 */
+
+/* 背景**写死深色**，不跟主题走：灯箱式的看图体验里，浅色底会把图片的边界感吃掉
+   （浅色截图、白底文档尤其明显）。深色底在深浅两套主题下都成立，也省掉"切主题时
+   预览层观感突然变一遍"。
+
+   遮罩上的文字和按钮同样是写死的浅色，理由同上：它们压在这层深色上，跟着主题走
+   会在浅色主题下变成深字压深底。预览层自己一套配色，反而更稳。 */
+.preview {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgba(12, 16, 24, .9);
+  display: flex;
+  flex-direction: column;
+  animation: fade-in .14s ease;
+}
+
+/* 必须显式写：`[hidden] { display: none !important }` 那条全局规则在样式表里，
+   而这里的 `display: flex` 是同优先级的类选择器——不补这条，两个主题下都会
+   一直盖在页面上。 */
+.preview[hidden] { display: none; }
+
+.preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  color: #fff;
+  flex: none;
+}
+
+/* min-width:0 是必需的：flex 子项默认 min-width:auto，不加的话省略号不生效，
+   长文件名会把右边的按钮挤出屏幕。 */
+.preview-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-pos {
+  flex: none;
+  white-space: nowrap;
+  font-size: 12px;
+  color: rgba(255, 255, 255, .62);
+}
+
+.pv-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, .22);
+  background: rgba(255, 255, 255, .08);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.pv-btn:hover {
+  background: rgba(255, 255, 255, .18);
+  border-color: rgba(255, 255, 255, .42);
+  text-decoration: none;
+}
+.pv-btn:disabled { opacity: .35; cursor: not-allowed; }
+.pv-btn:disabled:hover { background: rgba(255, 255, 255, .08); border-color: rgba(255, 255, 255, .22); }
+
+/* min-height:0 同样必需：不加它，里面的 iframe / 图片会撑破容器、
+   把顶栏顶出屏幕（flex 子项的默认 min-height:auto 会按内容算）。 */
+.preview-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px 18px;
+  overflow: auto;
+}
+
+.preview-stage img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+/* 视频留黑底：宽高比不匹配时那两条边是黑的，不写的话会露出遮罩色，看着像没铺满 */
+.preview-stage video { max-width: 100%; max-height: 100%; border-radius: 8px; background: #000; }
+
+.preview-audio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: min(560px, 100%);
+  color: #fff;
+}
+.preview-audio audio { width: 100%; }
+
+/* PDF 交给浏览器自己的阅读器（iframe 里就是它）。背景写白：阅读器自己会铺白底，
+   但在它加载出来之前的那一瞬间露出深色会闪一下。 */
+.preview-stage iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+/* 文本预览反而给一张**跟主题走**的卡片：它是"文档"不是"图片"，正文要读，
+   深底浅字读长文本很累。 */
+.preview-text {
+  margin: 0;
+  width: min(880px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 16px 18px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  /* 长行折行：不写的话一条长日志会把整块撑出横向滚动条，读起来要来回拖 */
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: left;
+}
+
+/* 浏览器放不了这个格式时的兜底（.mov 的解码器、.tiff 的渲染器都不是每个浏览器都有） */
+.preview-fallback {
+  max-width: 420px;
+  color: rgba(255, 255, 255, .82);
+  font-size: 13px;
+  line-height: 1.9;
+  text-align: center;
+}
+
+/* 窄屏：文件名独占一行，下面一行是计数 + 五个按钮。
+   不这么排的话，文件名会把按钮挤到第二行、第二行又只剩一半宽度。 */
+@media (max-width: 720px) {
+  .preview-bar { flex-wrap: wrap; padding: 8px 10px; gap: 6px; }
+  .preview-name { flex-basis: 100%; order: -1; }
+  .preview-pos { flex: 1; }
+  .preview-stage { padding: 0 10px 12px; }
+}
+
 /* ---------------------------------------------------------- 设置面板 */
 
 html.modal-open { overflow: hidden; }

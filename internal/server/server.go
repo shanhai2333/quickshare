@@ -494,6 +494,13 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		Mime      string `json:"mime"`
 		CreatedAt int64  `json:"createdAt"`
 		URL       string `json:"url"`
+		// Preview 是前端预览层该用哪种渲染方式（image / video / audio / pdf / text），
+		// 空串表示这个类型不给预览、只能下载。
+		//
+		// **由服务端给，不是前端自己按 mime 前缀猜**：能不能内联渲染是
+		// previewModeOf 那份白名单说了算的，前端再维护一份就会漂——漂了的表现是
+		// "点了预览直接触发下载"。
+		Preview string `json:"preview"`
 		// TTLSeconds 是这条自己的保留时长，0 = 跟随全局。前端拿它回填编辑框。
 		TTLSeconds int64 `json:"ttlSeconds"`
 		// ExpiresAt 是到期时刻（unix 秒），**0 表示永不删除**。
@@ -505,6 +512,7 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 			ID: f.ID, Name: f.Name, Size: f.Size, Mime: f.Mime,
 			CreatedAt:  f.CreatedAt.Unix(),
 			URL:        "/f/" + f.ID + "/" + urlEscape(f.Name),
+			Preview:    previewKindOf(f.Mime),
 			TTLSeconds: f.TTLSeconds,
 			ExpiresAt:  p.fileExpiry(f),
 		})

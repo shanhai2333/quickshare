@@ -21,6 +21,12 @@ const state = {
   // 正在"就地改保留时长"的那个文件的 id（同时只有一个）。列表整块重渲染，
   // 所以用 id 而不是保存 DOM 引用——重渲染之后引用就失效了。
   ttlEditId: null,
+
+  // 预览层里正在看的那个文件的 id（没开就是 null）。
+  //
+  // 存 id 不存下标：列表会被 SSE 刷新、也会被搜索筛掉，下标随时可能指向另一个
+  // 文件——那样用户按"下一个"会跳到毫不相干的地方。
+  previewId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -143,6 +149,9 @@ async function refreshAll() {
     $('authCard').hidden = true;
     $('uploadCard').hidden = false;
     renderFiles();
+    // 预览开着的时候列表被刷新了（别的设备传了东西、或删掉了正在看的那个）：
+    // 重新算一遍位置和计数；文件没了 renderPreview 会自己关掉预览层。
+    if (previewOpen()) renderPreview();
     return true;
   } catch (e) {
     toast(e.message, 'err');
@@ -155,6 +164,8 @@ async function refreshAll() {
 const FILE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v5h5M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z"/></svg>`;
 
 const LINK_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
+
+const EYE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 12S5.5 5.5 12 5.5 22.5 12 22.5 12 18.5 18.5 12 18.5 1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
 
 // 文件的可分享地址。
 //
@@ -232,6 +243,11 @@ function renderFiles() {
   tbody.innerHTML = list.map((f) => {
     const url = esc(f.url);
     const share = esc(shareURL(f));
+    // 只有服务端标了 preview 的类型才有这枚按钮（Word / PPT 之类不出现，
+    // 点了也只是白点一下）。放在最左边：对媒体文件来说它是最常用的动作。
+    const pv = f.preview
+      ? `<button class="btn btn-sm btn-icon" data-preview="${esc(f.id)}" title="预览">${EYE_ICON}</button>`
+      : '';
     return `
     <tr>
       <td>
@@ -242,7 +258,7 @@ function renderFiles() {
       <td class="col-hide-sm muted">${fmtTime(f.createdAt)}</td>
       <td>
         <div class="actions">
-          <a class="btn btn-sm" href="${url}?dl=1" download>下载</a>
+          ${pv}<a class="btn btn-sm" href="${url}?dl=1" download>下载</a>
           <button class="btn btn-sm btn-icon" data-copy="${share}" data-qr="${share}" title="复制链接 / 悬停出二维码">${LINK_ICON}</button>
           <button class="btn btn-sm btn-danger" data-del="${esc(f.id)}">删除</button>
         </div>
@@ -299,6 +315,163 @@ async function saveFileTTL(box) {
     await refreshAll();
   } catch (e) {
     toast(e.message, 'err');
+  }
+}
+
+/* ------------------------------------------------------------ 媒体预览 */
+
+// 哪些文件能预览、用哪种方式渲染，由**服务端**说了算：`/api/files` 每条带一个
+// `preview` 字段（image / video / audio / pdf / text，空串 = 只能下载）。
+//
+// 前端刻意**不按 mime 前缀自己猜一遍**：能不能内联渲染是服务端那份白名单决定的
+// （`inlineSafe` / `sandboxInline`），前端再维护一份，两份迟早会漂——漂了的表现是
+// "点了预览直接触发下载"，而且只有真去点一下才看得出来。
+//
+// Word / PPT 不在此列：浏览器原生不认这两种格式，而 Office Online / Google Docs
+// 那种在线预览要求文件能被**公网**拉到，内网服务够不着。
+
+// 文本预览的大小上限。
+//
+// 超了就不 fetch：一个 200MB 的日志塞进 <pre> 会把标签页卡死，而用户通常只是想
+// "看一眼"。给一句说明 + 下载入口比硬撑实在。
+const TEXT_PREVIEW_MAX = 512 * 1024;
+
+function previewOpen() {
+  return !$('previewOverlay').hidden;
+}
+
+// 当前该在预览层里翻的那一串，以及正看的是第几个。
+//
+// 只收**当前列表里可见的**（已经过了搜索和排序）——用户在列表里筛出几张图再看，
+// 按"下一个"就该在筛出来的这几张里走，而不是跳到被筛掉的文件上。
+function previewState() {
+  const list = visibleFiles().filter((f) => f.preview);
+  return { list, i: list.findIndex((f) => f.id === state.previewId) };
+}
+
+function openPreview(id) {
+  collapseQR(); // 悬停留下的二维码浮层会盖在预览层上
+  state.previewId = id;
+  if (previewState().i < 0) return;
+  document.documentElement.classList.add('modal-open');
+  $('previewOverlay').hidden = false;
+  renderPreview();
+}
+
+// 关掉预览。
+//
+// **必须先把里面的媒体停下来再清空。** 已经脱离文档的 <audio> / <video> 在部分
+// 浏览器里会继续出声：用户关掉预览之后还在响，而且页面上已经找不到是哪儿在响。
+// pause() + 摘掉 src + load() 才是让浏览器真正释放解码器的写法。
+function closePreview() {
+  stopMedia($('previewStage'));
+  $('previewStage').innerHTML = '';
+  $('previewOverlay').hidden = true;
+  state.previewId = null;
+  // 设置面板也在用这个类，它还开着就不能解锁
+  if ($('overlay').hidden) document.documentElement.classList.remove('modal-open');
+}
+
+function stopMedia(root) {
+  for (const m of root.querySelectorAll('video, audio')) {
+    m.pause();
+    m.removeAttribute('src');
+    m.load();
+  }
+}
+
+function stepPreview(delta) {
+  const { list, i } = previewState();
+  if (i < 0 || list.length < 2) return;
+  // 到头上绕回去。翻图的时候"按不动"比"绕一圈"更让人困惑——尤其是只有两张图时
+  // 左右两个键的行为会变得完全一样。
+  state.previewId = list[(i + delta + list.length) % list.length].id;
+  renderPreview();
+}
+
+function renderPreview() {
+  const { list, i } = previewState();
+  // 正在看的文件被删了、或者被搜索条件筛掉了
+  if (i < 0) { closePreview(); return; }
+
+  const f = list[i];
+  const stage = $('previewStage');
+
+  $('previewName').textContent = f.name;
+  $('previewPos').textContent = `${i + 1} / ${list.length}`;
+  $('previewPrev').disabled = $('previewNext').disabled = list.length < 2;
+  $('previewOpen').href = f.url;
+  $('previewDl').href = f.url + '?dl=1';
+
+  // 换内容之前先停掉上一个（同 closePreview 的理由）
+  stopMedia(stage);
+  stage.innerHTML = '';
+
+  const url = esc(f.url);
+  switch (f.preview) {
+    case 'image':
+      stage.innerHTML = `<img src="${url}" alt="${esc(f.name)}">`;
+      break;
+    case 'video':
+      // 不写 autoplay：浏览器本来就拦，而且翻到一个视频就自己响起来很烦
+      stage.innerHTML = `<video src="${url}" controls playsinline preload="metadata"></video>`;
+      break;
+    case 'audio':
+      stage.innerHTML = `<div class="preview-audio"><audio src="${url}" controls preload="metadata"></audio></div>`;
+      break;
+    case 'pdf':
+      // 交给浏览器自己的 PDF 阅读器（iframe 里跑的就是它），缩放/翻页都不用我们做
+      stage.innerHTML = `<iframe src="${url}" title="${esc(f.name)}"></iframe>`;
+      return;
+    case 'text':
+      loadTextPreview(f, stage);
+      return;
+    default:
+      stage.innerHTML = `<div class="preview-fallback">这个类型不支持预览。</div>`;
+      return;
+  }
+
+  // 类型在服务端的白名单里，**不等于这个浏览器放得出来**：.mov 要看解码器、
+  // .tiff 基本没有浏览器认、.flac 在旧 Safari 上也不行。失败时给一条明确的出路，
+  // 而不是留一块空白让人以为文件坏了。
+  const media = stage.querySelector('img, video, audio');
+  if (media) {
+    media.addEventListener('error', () => {
+      stage.innerHTML = `<div class="preview-fallback">
+        这个格式当前浏览器放不出来。<br>
+        点上面的「在新标签页打开」或「下载」试试。
+      </div>`;
+    }, { once: true });
+  }
+}
+
+async function loadTextPreview(f, stage) {
+  if (f.size > TEXT_PREVIEW_MAX) {
+    stage.innerHTML = `<div class="preview-fallback">
+      这个文本有 ${fmtSize(f.size)}，不在页面里展开了。<br>
+      点上面的「在新标签页打开」或「下载」。
+    </div>`;
+    return;
+  }
+
+  const box = document.createElement('pre');
+  box.className = 'preview-text';
+  box.textContent = '读取中…';
+  stage.appendChild(box);
+
+  // 用 textContent 而不是 innerHTML：文件内容原样显示，不参与 HTML 解析。
+  // 服务端也是按 text/plain 回的，两道都不靠"内容里没有尖括号"这种假设。
+  const want = f.id;
+  try {
+    const res = await fetch(f.url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const text = await res.text();
+    // 请求回来时用户可能已经翻到下一个了，别把内容写进别人的格子
+    if (state.previewId !== want) return;
+    box.textContent = text || '（空文件）';
+  } catch (e) {
+    if (state.previewId !== want) return;
+    box.textContent = '读取失败：' + (e.message || e);
   }
 }
 
@@ -659,6 +832,13 @@ function bind() {
   });
 
   $('fileRows').addEventListener('click', async (e) => {
+    // 打开预览
+    const pv = e.target.closest('[data-preview]');
+    if (pv) {
+      openPreview(pv.getAttribute('data-preview'));
+      return;
+    }
+
     // 就地改保留时长。放在最前面：这几样都不是按钮，后面的
     // `closest('button[data-del]')` 也不会误匹配，但顺序清楚点更好读。
     const chip = e.target.closest('[data-ttl]');
@@ -719,6 +899,44 @@ function bind() {
       e.stopPropagation();
       state.ttlEditId = null;
       renderFiles();
+    }
+  });
+
+  // ---- 预览层
+  //
+  // 这里只绑"预览层自己"的动作。里面那枚「下载」和「在新标签页打开」是普通
+  // <a>，href 在 renderPreview 里逐条设好，不用额外处理。
+  $('previewClose').addEventListener('click', closePreview);
+  $('previewPrev').addEventListener('click', () => stepPreview(-1));
+  $('previewNext').addEventListener('click', () => stepPreview(1));
+
+  // 点遮罩空白处关掉。点在内容上（图片 / 视频 / 文本框）不算——那是"看"不是"关"，
+  // 而且看图时手滑点到图上就把预览关了会很烦。
+  $('previewOverlay').addEventListener('click', (e) => {
+    if (e.target === $('previewOverlay') || e.target === $('previewStage')) closePreview();
+  });
+
+  // 键盘：Esc 关、左右翻。
+  //
+  // 两条都不能省：
+  //   ① 焦点在输入框里时不接管——搜索框里按左右键是要移光标的，
+  //      按 Esc 是要清掉搜索词的（浏览器自带），抢过来会让用户莫名其妙。
+  //   ② Esc 要 stopPropagation。设置面板也在 document 上监听 Esc（settings.js，
+  //      它先注册所以先跑），不拦住的话一次按键会关两层。
+  document.addEventListener('keydown', (e) => {
+    if (!previewOpen()) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      closePreview();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      stepPreview(-1);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      stepPreview(1);
     }
   });
 }
