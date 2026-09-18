@@ -43,6 +43,7 @@ PORT=18080
 PORT_AUTH=18081
 PORT_SWITCH=18082
 PORT_PROXY=18083
+PORT_UPDATE=18084
 DATA=".tmp/qs-test"
 LOG=".tmp/e2e-server.log"
 
@@ -190,14 +191,16 @@ else
 fi
 A="http://127.0.0.1:$PORT_AUTH"
 SW="http://127.0.0.1:$PORT_SWITCH"
-P="http://127.0.0.1:$PORT_PROXY"
+PBASE="http://127.0.0.1:$PORT_PROXY"
+UBASE="http://127.0.0.1:$PORT_UPDATE"
 
 cleanup() {
-  # 只收自己起的实例。$PORT_AUTH / $PORT_SWITCH / $PORT_PROXY 上的实例无论哪种模式
-  # 都是本脚本起的。
+  # 只收自己起的实例。$PORT_AUTH / $PORT_SWITCH / $PORT_PROXY / $PORT_UPDATE 上的实例
+  # 无论哪种模式都是本脚本起的。
   kill_port $PORT_AUTH
   kill_port $PORT_SWITCH
   kill_port $PORT_PROXY
+  kill_port $PORT_UPDATE
   if [ "$OWN" = "1" ]; then kill_port $PORT; fi
   # 顺手把测试数据目录清掉。留着既没用，又会一轮轮攒文件，最后把下次开头的
   # 清理卡住（见 wipe_dir 的注释）。$TMP 里的日志刻意保留，排查时要看。
@@ -1442,34 +1445,95 @@ QS_TRUSTED_PROXIES=127.0.0.1 QS_UPDATE_CHECK=0 \
   "$BIN" -addr "127.0.0.1:$PORT_PROXY" -data "$TMP/proxydata" -tray=false \
   > "$TMP/proxy.log" 2>&1 &
 for _ in $(seq 1 40); do
-  [ "$(code "$P/api/config")" = "200" ] && break
+  [ "$(code "$PBASE/api/config")" = "200" ] && break
   sleep 0.25
 done
 
 chk "配了名单后，X-Forwarded-For 里的地址成为设备身份" \
-  "$(curl -s -H 'X-Forwarded-For: 198.51.100.7' "$P/api/config" | jget clientIp)" "198.51.100.7"
+  "$(curl -s -H 'X-Forwarded-For: 198.51.100.7' "$PBASE/api/config" | jget clientIp)" "198.51.100.7"
 
 # **核心一条**：取的是从右往左第一个不受信的地址。代理把真实地址**追加**在末尾，
 # 客户端自己塞的留在左边；从左边取就等于让请求方自己填身份。
 chk "伪造的左侧条目被忽略，取右边真实的那个" \
-  "$(curl -s -H 'X-Forwarded-For: 127.0.0.1, 203.0.113.9' "$P/api/config" | jget clientIp)" "203.0.113.9"
+  "$(curl -s -H 'X-Forwarded-For: 127.0.0.1, 203.0.113.9' "$PBASE/api/config" | jget clientIp)" "203.0.113.9"
 
 chk "链上多级受信代理时继续往左找" \
-  "$(curl -s -H 'X-Forwarded-For: 203.0.113.9, 127.0.0.1' "$P/api/config" | jget clientIp)" "203.0.113.9"
+  "$(curl -s -H 'X-Forwarded-For: 203.0.113.9, 127.0.0.1' "$PBASE/api/config" | jget clientIp)" "203.0.113.9"
 
 chk "只有 X-Real-IP 时也认（Nginx 常见写法）" \
-  "$(curl -s -H 'X-Real-IP: 198.51.100.9' "$P/api/config" | jget clientIp)" "198.51.100.9"
+  "$(curl -s -H 'X-Real-IP: 198.51.100.9' "$PBASE/api/config" | jget clientIp)" "198.51.100.9"
 
 chk "两个头都没有时退回源地址（本机）" \
-  "$(curl -s "$P/api/config" | jget clientIp)" "localhost"
+  "$(curl -s "$PBASE/api/config" | jget clientIp)" "localhost"
 
 # 身份要真的流进设备表，不只是 /api/config 回显对了
 curl -s -X POST -H 'Content-Type: application/json' -H 'X-Forwarded-For: 198.51.100.7' \
-  -d '{"content":"经代理发的"}' "$P/api/texts" > /dev/null
+  -d '{"content":"经代理发的"}' "$PBASE/api/texts" > /dev/null
 chk "经代理发的文本按转发地址登记设备" \
-  "$(curl -s -H 'X-Forwarded-For: 198.51.100.7' "$P/api/devices" | "$PY" -c 'import sys,json;print(any(d["id"]=="198.51.100.7" and d["isMe"] for d in json.load(sys.stdin)))')" "True"
+  "$(curl -s -H 'X-Forwarded-For: 198.51.100.7' "$PBASE/api/devices" | "$PY" -c 'import sys,json;print(any(d["id"]=="198.51.100.7" and d["isMe"] for d in json.load(sys.stdin)))')" "True"
 
 kill_port $PORT_PROXY
+
+# ---------------------------------------------------------------- 25
+echo
+echo "=== 25. 更新检查的源配置（不联网的那几条） ==="
+
+# 这一节刻意**只验配置怎么被解读**，一个远端都不问：e2e 不该因为 GitHub 抽风变红。
+# 真去查 GitHub / Docker Hub 的那条路在 internal/server/update_test.go 里用假服务端覆盖。
+#
+# QS_UPDATE_CHECK=1 是显式写的：这两条要走的正是"检查开着"的那条分支，
+# 而调用方的环境里可能正好设了 0。
+
+# ---- 25.1 dockerhub 源但没给仓库 → 必须主动关掉
+#
+# 这是文档里写死的规则：**绝不能回落到注入的 GitHub 仓库名**——那是 GitHub 的命名空间，
+# 放到 Docker Hub 下一定查不到，结果是一个永远查不到、又看不出原因的检查。
+#
+# 判据是 /api/version 的 enabled，它等于"repo 是不是空"。注意这条在**注入了 Repo 的产物**
+# 上才有区分力：裸 `go build` 注入的是空串，回落也是空、照样 False。所以下面同时断言日志
+# ——那行是打印在不依赖注入值的那条路径上的。
+kill_port $PORT_UPDATE # 上一轮若异常退出可能还占着
+QS_UPDATE_CHECK=1 QS_UPDATE_SOURCE=dockerhub \
+  "$BIN" -addr "127.0.0.1:$PORT_UPDATE" -data "$TMP/upddata" -tray=false \
+  > "$TMP/update.log" 2>&1 &
+for _ in $(seq 1 40); do
+  [ "$(code "$UBASE/api/config")" = "200" ] && break
+  sleep 0.25
+done
+UPD="$(curl -s "$UBASE/api/version")"
+# **前置**：先确认这个实例真的答了。少了这一条，基准地址写错（比如变量名被别处的
+# 上传 ID 覆盖掉）会让 jget 抛 KeyError、输出空串，断言报"期望 [False] 实际 []"——
+# 看着像产品坏了，其实请求压根没打到那个实例上。下面那条"不报错"的期望值恰好也是
+# 空串，于是它会**假绿**，把真正的错误盖掉一半。
+chk "前置：更新检查实例的 /api/version 能正常返回" \
+  "$([ -n "$(printf '%s' "$UPD" | jget current)" ] && echo ok || echo empty)" "ok"
+chk "dockerhub 源没给仓库时，更新检查被关掉（enabled=False）" \
+  "$(printf '%s' "$UPD" | jget enabled)" "False"
+chk "…而且不报错" "$(printf '%s' "$UPD" | jget error)" ""
+chk "…也不提示有更新" "$(printf '%s' "$UPD" | jget hasUpdate)" "False"
+case "$(cat "$TMP/update.log" 2>/dev/null)" in
+  *'没设 QS_UPDATE_REPO'*) ok "启动日志说明了为什么要关（不是静默关掉）" ;;
+  *) bad "启动日志说明了为什么要关 — 没找到那行" ;;
+esac
+kill_port $PORT_UPDATE
+
+# ---- 25.2 认不出的源 → 回落到 github 并说明
+#
+# 这里给了 QS_UPDATE_REPO，检查是**开着**的，所以刻意**不去请求 /api/version**——
+# 那会真的去问 GitHub，CI 上就跟着网络状态飘了。只看启动时写下的那行警告。
+kill_port $PORT_UPDATE
+QS_UPDATE_CHECK=1 QS_UPDATE_SOURCE=gitlab QS_UPDATE_REPO=someone/quickshare \
+  "$BIN" -addr "127.0.0.1:$PORT_UPDATE" -data "$TMP/upddata2" -tray=false \
+  > "$TMP/update2.log" 2>&1 &
+for _ in $(seq 1 40); do
+  [ "$(code "$UBASE/api/config")" = "200" ] && break
+  sleep 0.25
+done
+case "$(cat "$TMP/update2.log" 2>/dev/null)" in
+  *'无法识别，按 "github" 处理'*) ok "认不出的源回落到 github 并说明" ;;
+  *) bad "认不出的源回落到 github 并说明 — 没找到那行" ;;
+esac
+kill_port $PORT_UPDATE
 
 echo
 echo "=================================================="
