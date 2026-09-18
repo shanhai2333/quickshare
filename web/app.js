@@ -365,6 +365,7 @@ function openPreview(id) {
 // pause() + 摘掉 src + load() 才是让浏览器真正释放解码器的写法。
 function closePreview() {
   stopMedia($('previewStage'));
+  endMediaSession();
   $('previewStage').innerHTML = '';
   $('previewOverlay').hidden = true;
   state.previewId = null;
@@ -378,6 +379,23 @@ function stopMedia(root) {
     m.removeAttribute('src');
     m.load();
   }
+}
+
+// 把这一次的**媒体会话**也收掉。
+//
+// 光把元素摘掉是不够的，这一点是量出来的：用 CDP 的 Media 域看，关掉预览时
+// 播放器确实被销毁了（`kPause` 紧跟着 `kWebMediaPlayerDestroyed`），但系统那一层的
+// 媒体面板（Windows 的「媒体控件」/ 浏览器工具栏的全局媒体控制）**不会跟着消失**——
+// Chrome 会替这个标签页留着会话，只有文档没了（刷新 / 关标签页）才结束。
+// 表现就是用户说的「关掉视频面板还在，必须刷新才会消失」（2026-09-19 实测反馈）。
+//
+// 收尾要用 Media Session API 明说，别指望元素没了会话就没了。写不进去（老浏览器、
+// 或者用户禁了）也不能影响关预览本身，所以两处都单独兜住。
+function endMediaSession() {
+  const ms = navigator.mediaSession;
+  if (!ms) return;
+  try { ms.playbackState = 'none'; } catch (e) { /* 不支持就算了 */ }
+  try { ms.metadata = null; } catch (e) { /* 同上 */ }
 }
 
 function stepPreview(delta) {
@@ -403,8 +421,10 @@ function renderPreview() {
   $('previewOpen').href = f.url;
   $('previewDl').href = f.url + '?dl=1';
 
-  // 换内容之前先停掉上一个（同 closePreview 的理由）
+  // 换内容之前先停掉上一个（同 closePreview 的理由）：停媒体 + 收掉媒体会话，
+  // 否则从视频切到图片之后，系统那个媒体面板还挂在上面。
   stopMedia(stage);
+  endMediaSession();
   stage.innerHTML = '';
 
   const url = esc(f.url);
@@ -437,6 +457,9 @@ function renderPreview() {
   const media = stage.querySelector('img, video, audio');
   if (media) {
     media.addEventListener('error', () => {
+      // 拆元素时我们自己会触发一次 error（`removeAttribute('src') + load()` 是**同步**
+      // 响的，量过），那是"拆"的动作，不是"放不出来"。这里只处理还在台上的那个元素。
+      if (!stage.contains(media)) return;
       stage.innerHTML = `<div class="preview-fallback">
         这个格式当前浏览器放不出来。<br>
         点上面的「在新标签页打开」或「下载」试试。
