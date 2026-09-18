@@ -369,6 +369,68 @@ tbody tr:hover { background: var(--surface-2); }
 
 .fname a:hover { color: var(--accent); text-decoration: none; }
 
+/* ---- 列表里的「还剩 X 天 / 永久保留」
+
+   这行显示的是**当前状态**（东西会不会被自动删掉），不是可以跳过的说明，所以用
+   --text-2，不跟着 .muted 用 --text-3（浅色下只有 3.1:1）。同 #ttlHintText / #verHint。
+
+   点它能就地改这个文件 / 这条文本的保留时长，所以做成"可点"的样子：虚线下划线 +
+   hover 变 accent，和 #ttlHint 同一套视觉语言，不再另造一种按钮。 */
+.fttl { margin-top: 5px; }
+
+.ttl-chip {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--text-2);
+  border-bottom: 1px dashed var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  /* 和 .titem-tag 同理：它在 flex 行里，不给 flex:none 就会被压窄，
+     而 nowrap 的文字会从盒子里溢出去，看着像"标签和后面的按钮叠在一起" */
+  flex: none;
+}
+.ttl-chip:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* 「验证码」标签：它不是可点的东西，别长得像 .ttl-chip，否则用户会去点它。
+   所以实线边框 + 不换行，跟标签一个观感。 */
+.ttl-tag-code {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+  flex: none;
+}
+
+/* 就地改保留时长的编辑器（文件列表 / 文本列表共用同一份标记）。
+   flex-wrap 是给窄屏留的：一行放不下时让「取消」换行，而不是把输入框挤没。 */
+.ttl-edit {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 5px;
+}
+.ttl-edit .ttl-num { flex: none; width: 82px; font-size: 12px; }
+.ttl-edit .ttl-unit { flex: none; font-size: 12px; }
+.ttl-edit-note { font-size: 11px; color: var(--text-2); }
+
+/* 文本页编辑框里那一行「保留 [数字] [单位]」 */
+.titem-ttl-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.titem-ttl-row .ttl-num { flex: none; width: 82px; font-size: 12px; }
+.titem-ttl-row .ttl-unit { flex: none; font-size: 12px; }
+
 .muted { color: var(--text-3); }
 .num { font-variant-numeric: tabular-nums; }
 
@@ -746,9 +808,20 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 }
 .titem.editing { border-color: var(--accent); }
 
-.titem-head { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 8px; }
+/* flex-wrap 是必需的：这一行里现在有设备名、时间、可能还有「验证码」标签和
+   剩余时间 chip，右端还挤着三个按钮。不换行的话被压缩的不是按钮，而是**前面
+   那几个纯文字 span**——它们没有 flex:none，会被压成"未/知/设/备"竖着排，
+   看起来像排版坏了（390px 下实测如此）。换行之后按钮整排落到第二行。 */
+.titem-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; margin-bottom: 8px; }
 .titem-head .spacer { flex: 1; }
-.titem-dev { font-weight: 600; font-size: 12px; }
+
+/* 同理：这两个也不能被压缩，否则会折成多行。.titem-tag 早就吃过这个亏
+   （被压成"已\n编辑"），这里是同一个坑的另外两个成员。 */
+.titem-dev { font-weight: 600; font-size: 12px; flex: none; white-space: nowrap; }
+.titem-head .muted { flex: none; white-space: nowrap; }
+
+/* 三个按钮当成一组：窄屏换行时整组一起落到第二行，而不是被拆散 */
+.titem-btns { flex: none; display: flex; align-items: center; gap: 8px; }
 
 .titem-tag {
   font-size: 11px;
@@ -862,12 +935,16 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
    节奏对齐；下面不补——.toolbar 自带的 12px 就是表格上方要的空隙。 */
 #fileToolbar { padding: 14px 18px 0; }
 
+/* 保留时长的那几个控件按**类**写，不跟上面这几个 id 排一起：
+   它是三档（文本 / 验证码 / 文件）+ 两个列表里的就地编辑器共用的，
+   按 id 写的话每加一档都要回来补一遍，漏掉的那档就退回浏览器默认外观
+   （一个又小又窄的裸输入框），而"少样式"这种问题截图里不显眼、很容易漏过去。 */
 #searchInput,
 #deviceFilter,
 #fileSearch,
 #fileSort,
-#ttlValue,
-#ttlUnit {
+.ttl-num,
+.ttl-unit {
   padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -881,15 +958,15 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 #deviceFilter:focus,
 #fileSearch:focus,
 #fileSort:focus,
-#ttlValue:focus,
-#ttlUnit:focus {
+.ttl-num:focus,
+.ttl-unit:focus {
   outline: none;
   border-color: var(--accent);
   background: var(--surface);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-#deviceFilter, #fileSort, #ttlUnit { cursor: pointer; }
+#deviceFilter, #fileSort, .ttl-unit { cursor: pointer; }
 
 /* 多选开关的激活态：跟 .seg-item.active 一个思路，选中要看得出来。
    文字用 --text-2 而不是 --accent：accent 压在 accent-soft 上，
@@ -956,20 +1033,25 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
   text-decoration: none;
 }
 
-/* 首页设置面板里的「保留 [数字] [单位] [应用]」 */
+/* 设置面板里的「保留 [数字] [单位] [应用]」。三档（文本 / 验证码 / 文件）长得
+   一样，所以按**类**写而不是按 id 写——按 id 写的话，加一档就得记着再补一条，
+   漏了那一档的输入框会撑满整行。 */
 .ttl-lead { flex: none; font-size: 12px; color: var(--text-2); }
-#ttlValue { flex: 1; min-width: 0; max-width: 110px; }
-#ttlUnit { flex: none; }
+.path-row .ttl-num { flex: 1; min-width: 0; max-width: 110px; font-size: 13px; }
+.path-row .ttl-unit { flex: none; font-size: 13px; }
 
 /* 这行显示的是**当前状态**（保留多久 / 还是压根不删），不是可以跳过的说明，
    所以跟上面的 .ttl-lead 一样用 --text-2，别跟着 .hint 用 --text-3。
    浅色下 --text-3 在白底上只有 3.1:1，而这行恰恰是用户判断"东西会不会被自动删掉"
-   的依据，读不清就失去了意义。下面那句静态说明仍用 .hint。 */
-#ttlHintText { color: var(--text-2); }
+   的依据，读不清就失去了意义。下面那句静态说明仍用 .hint。
+
+   按**类**选（.ttl-now）而不是按 id：三档各有一个提示，按 id 写就得写三条，
+   加一档漏一条的话那一档的提示会掉回 --text-3。 */
+.ttl-now { color: var(--text-2); }
 
 /* ---- 关于 / 版本 */
 
-/* 更新提示沿用 #pruneHint / #ttlHintText 的先例：它承载"要不要去升级"这个决定，
+/* 更新提示沿用 #pruneHint / .ttl-now 的先例：它承载"要不要去升级"这个决定，
    用 --text-2（浅色 6:1、深色 7.4:1），不跟着 .hint 用 --text-3。 */
 #verHint { color: var(--text-2); }
 

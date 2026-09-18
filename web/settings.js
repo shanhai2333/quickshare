@@ -36,6 +36,165 @@ const QSSettings = (() => {
     ['opFiles', 'opFilesVal', 'files'],
   ];
 
+  // 三档保留时长的控件描述。key 跟 /api/settings 里的字段名一一对应，
+  // 加一档只要在这里加一行，标记、回显、保存都会跟着走。
+  //
+  // 0 的含义在这三档里**不一样**：文本和文件那两档是"永不删除"，
+  // 验证码那档是"关掉这条规则"。所以文案分开写——说错会让人按错方向理解。
+  const TTL_SPECS = [
+    {
+      key: 'textTTL',
+      valueId: 'ttlValue', unitId: 'ttlUnit', saveId: 'ttlSave', hintId: 'ttlHintText',
+      lead: '超过', subject: '的文本会被自动删除',
+      zero: '不自动删除，文本会一直留着',
+      zeroToast: '已关闭自动清理', onToast: '已开启自动清理',
+      def: { value: 0, unit: 'day' },
+    },
+    {
+      key: 'codeTTL',
+      valueId: 'codeTtlValue', unitId: 'codeTtlUnit', saveId: 'codeTtlSave', hintId: 'codeTtlHint',
+      lead: '识别为验证码的文本超过', subject: '会被自动删除',
+      zero: '不特殊处理，验证码按上面的「文本保留时间」走',
+      zeroToast: '已关掉验证码规则', onToast: '已开启验证码规则',
+      def: { value: 10, unit: 'minute' },
+    },
+    {
+      key: 'fileTTL',
+      valueId: 'fileTtlValue', unitId: 'fileTtlUnit', saveId: 'fileTtlSave', hintId: 'fileTtlHint',
+      lead: '超过', subject: '的文件会被自动删除',
+      zero: '不自动删除，文件会一直留着',
+      zeroToast: '已关闭自动清理', onToast: '已开启自动清理',
+      def: { value: 0, unit: 'day' },
+    },
+  ];
+
+  // 保留时长的单位。**加「分钟」主要是为了验证码那档**：默认 10 分钟用"天"
+  // 根本表达不出来。另外两档也一起有了，它们本来就有短保留的需求。
+  const TTL_UNITS = [['minute', '分钟'], ['hour', '小时'], ['day', '天']];
+
+  function ttlUnitLabel(u) {
+    for (const [v, t] of TTL_UNITS) if (v === u) return t;
+    return '天';
+  }
+
+  function ttlUnitValid(u) {
+    return TTL_UNITS.some(([v]) => v === u);
+  }
+
+  // 单位的人话写法。首页、文本页的列表都要用，所以从这里出——两边各写一份的话，
+  // 迟早一边写"分钟"、另一边漏了 minute 掉进默认分支显示成"天"。
+  function ttlUnitText(u) {
+    return ttlUnitLabel(u);
+  }
+
+  // 把绝对到期时刻写成"还剩多久"。
+  //
+  // **单位按"四舍五入后的数值"挑，不是按"够不够一个单位"挑。** 这个区别很实际：
+  // 到期时刻是 `created_at + ttl`，而用户是过一会儿才去设这个时长的——按
+  // "够不够"挑的话，刚把保留时长设成 1 小时，列表上立刻显示"还剩 59 分钟"
+  // （因为文件是十几秒前传的），看着像没设上。同理 2 天会显示成"还剩 1 天"。
+  // 四舍五入之后这两种都落在正确的那一档上。
+  //
+  // 先判天数再判小时：`Math.round` 会给出 0，而 0 表示"该用更小的单位"。
+  function fmtLeft(expiresAt) {
+    const left = Number(expiresAt) - Math.floor(Date.now() / 1000);
+    if (!(left > 0)) return '即将删除';
+    const days = Math.round(left / 86400);
+    if (days >= 1) return `还剩 ${days} 天`;
+    const hours = Math.round(left / 3600);
+    if (hours >= 1) return `还剩 ${hours} 小时`;
+    const mins = Math.round(left / 60);
+    if (mins >= 1) return `还剩 ${mins} 分钟`;
+    return '即将删除';
+  }
+
+  // 「0」这一档到底等于什么，取决于全局设置，所以提示里要把全局值写出来。
+  //
+  // 只写「0 = 跟随全局设置」是不够的：用户看到列表上写着"还剩 1 小时"、点开编辑器
+  // 却是"0 天"，会以为编辑器读错了。把全局值带上，0 才不是个谜。
+  //
+  // 读不到设置时退回该档的默认值（和"全局没开自动删除"是同一个意思），
+  // 这样"设置还没拉回来"和"全局真的关着"显示的是同一句话，不会先错一下再改。
+  function followNote(key) {
+    const spec = TTL_SPECS.find((x) => x.key === key);
+    const g = settings[key] || (spec && spec.def);
+    if (g && Number(g.value) > 0) {
+      return `0 = 跟随全局设置（${g.value} ${ttlUnitLabel(g.unit)}）`;
+    }
+    return '0 = 跟随全局设置（现在没开自动删除）';
+  }
+
+  function ttlToSecs(value, unit) {
+    const per = { minute: 60, hour: 3600, day: 86400 }[unit] || 86400;
+    return Math.max(0, Math.round(Number(value) || 0)) * per;
+  }
+
+  // 秒数 → (数值, 单位)。单条覆盖在库里只存秒数（只给机器用），要给人看、给人改
+  // 就得还原成"1 天"而不是"86400 秒"。**优先用大单位，能整除才用**：86400 秒
+  // 写成"1 天"，5400 秒写成"90 分钟"（面板只收整数，写成"1.5 小时"填不回去）。
+  function secsToTtl(sec) {
+    const n = Math.max(0, Math.round(Number(sec) || 0));
+    if (n === 0) return { value: 0, unit: 'day' };
+    if (n % 86400 === 0) return { value: n / 86400, unit: 'day' };
+    if (n % 3600 === 0) return { value: n / 3600, unit: 'hour' };
+    return { value: Math.max(1, Math.round(n / 60)), unit: 'minute' };
+  }
+
+  // 只出「[数字] [单位]」这两个控件。文本页的编辑框里用它——那边的保存/取消
+  // 已经由卡片自己的按钮承担了，再摆一套会让人不知道该按哪个。
+  function ttlFieldsMarkup(secs) {
+    const t = secsToTtl(secs);
+    const opts = TTL_UNITS.map(([v, label]) =>
+      `<option value="${v}"${v === t.unit ? ' selected' : ''}>${label}</option>`).join('');
+    return `<input type="number" class="ttl-num" min="0" max="10000" step="1" value="${t.value}" aria-label="保留时长">
+          <select class="ttl-unit" aria-label="保留时长的单位">${opts}</select>`;
+  }
+
+  // 列表里"就地改单条保留时长"的那个小编辑器。首页和文本页共用同一份标记：
+  // 各写一遍的话，"0 = 跟随全局设置"这句提示迟早只在一边出现——而它恰恰是
+  // 这一档最容易理解错的地方（0 不是"立刻删"，也不是"永不删"）。
+  function ttlEditorMarkup(secs, note) {
+    return `<span class="ttl-edit">
+          ${ttlFieldsMarkup(secs)}
+          <button class="btn btn-sm" data-ttl-save>应用</button>
+          <button class="btn btn-sm" data-ttl-cancel>取消</button>
+          <span class="ttl-edit-note">${note || '0 = 跟随全局设置'}</span>
+        </span>`;
+  }
+
+  // 读回编辑器里的秒数。校验口径和服务端一致（0..10000 的整数），免得填个
+  // 3.5 天先跑到服务端再被打回来。
+  function readTtlEditor(root) {
+    const num = root && root.querySelector('.ttl-num');
+    const unit = root && root.querySelector('.ttl-unit');
+    if (!num || !unit) return { ok: false, msg: '找不到保留时长输入框' };
+    const raw = String(num.value || '').trim();
+    const value = raw === '' ? 0 : Number(raw);
+    if (!Number.isInteger(value) || value < 0 || value > 10000) {
+      return { ok: false, msg: '保留时长要填 0 到 10000 之间的整数' };
+    }
+    return { ok: true, secs: ttlToSecs(value, unit.value) };
+  }
+
+  // 三档保留时长的标记长得一模一样，用生成而不是抄三遍——抄的话以后改一处
+  // 漏两处，而"看起来一样、行为不一样"的偏差最难查。
+  function ttlBlock(spec, page, label, note) {
+    const opts = TTL_UNITS
+      .map(([v, t]) => `<option value="${v}">${t}</option>`).join('');
+    return `
+      <div class="field" data-page="${page}">
+        <div class="field-label">${label}</div>
+        <div class="path-row">
+          <span class="ttl-lead">保留</span>
+          <input type="number" class="ttl-num" id="${spec.valueId}" min="0" max="10000" step="1" value="${spec.def.value}">
+          <select class="ttl-unit" id="${spec.unitId}">${opts}</select>
+          <button class="btn btn-sm" id="${spec.saveId}">应用</button>
+        </div>
+        <div class="hint ttl-now" id="${spec.hintId}"></div>
+        <div class="hint">${note}</div>
+      </div>`;
+  }
+
   const ICON_SUN = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.4M12 19.6V22M4.2 4.2l1.7 1.7M18.1 18.1l1.7 1.7M2 12h2.4M19.6 12H22M4.2 19.8l1.7-1.7M18.1 5.9l1.7-1.7"/></svg>`;
   const ICON_MOON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.6A8.6 8.6 0 019.4 3.5a8.6 8.6 0 1011.1 11.1z"/></svg>`;
 
@@ -93,12 +252,15 @@ const QSSettings = (() => {
           <input type="range" id="opTopbar" min="20" max="100" step="1" value="85">
           <span class="slider-val" id="opTopbarVal">85%</span>
         </div>
-        <div class="slider">
+        <!-- 「上传区」「文件列表」只有首页有这两个区域，文本页放这两行没意义。
+             data-page 加在 .slider 这一行上而不是整个 .field 上：顶部栏那一行
+             两页都要留着，标在 .field 上会连它一起藏掉。 -->
+        <div class="slider" data-page="files">
           <span class="slider-label">上传区</span>
           <input type="range" id="opUpload" min="20" max="100" step="1" value="85">
           <span class="slider-val" id="opUploadVal">85%</span>
         </div>
-        <div class="slider">
+        <div class="slider" data-page="files">
           <span class="slider-label">文件列表</span>
           <input type="range" id="opFiles" min="20" max="100" step="1" value="85">
           <span class="slider-val" id="opFilesVal">85%</span>
@@ -106,22 +268,13 @@ const QSSettings = (() => {
         <div class="hint">只在显示背景图时生效。调低能让背景透出来，但文字也会变难认。</div>
       </div>
 
-      <div class="field">
-        <div class="field-label">文本保留时间</div>
-        <div class="path-row">
-          <span class="ttl-lead">保留</span>
-          <input type="number" id="ttlValue" min="0" max="10000" step="1" value="0">
-          <select id="ttlUnit">
-            <option value="day">天</option>
-            <option value="hour">小时</option>
-          </select>
-          <button class="btn btn-sm" id="ttlSave">应用</button>
-        </div>
-        <div class="hint" id="ttlHintText"></div>
-        <div class="hint">填 0 表示不自动删除，文本会一直留着，需要手动清理。只影响文本页的文本，不涉及上传的文件。</div>
-      </div>
+      ${ttlBlock(TTL_SPECS[0], 'text', '文本保留时间',
+        '只影响文本页的文本，不涉及上传的文件。')}
 
-      <div class="field">
+      ${ttlBlock(TTL_SPECS[1], 'text', '验证码过期时间',
+        '整条是 4~8 位数字，或者短文里出现「验证码」「动态码」这类关键词并带着数字，就会被当成验证码。填 0 表示关掉这条规则，验证码按上面的「文本保留时间」走。')}
+
+      <div class="field" data-page="text">
         <div class="field-label">设备记录</div>
         <div class="seg" id="pruneSeg">
           <button class="seg-item" data-prune-opt="0">保留</button>
@@ -130,7 +283,10 @@ const QSSettings = (() => {
         <div class="hint" id="pruneHint">设备记录留着，你给它起的名字下次还在。选「随文本一起删除」后，某台设备一条文本都不剩时，它的记录（含备注）也会被删掉——刚打开时会把已经空掉的记录立刻清一遍。只动设备记录，不删任何文本。</div>
       </div>
 
-      <div class="field">
+      ${ttlBlock(TTL_SPECS[2], 'files', '文件保留时间',
+        '按上传时间算，超过就删，文件本体和分片一起清掉。')}
+
+      <div class="field" data-page="files">
         <div class="field-label">文件存储位置</div>
         <div class="path-row">
           <input type="text" id="dataDirInput" spellcheck="false" autocomplete="off" placeholder="例如 /volume1/quickshare/data">
@@ -169,6 +325,8 @@ const QSSettings = (() => {
     bgBlur: 0,
     opacity: DEFAULT_OPACITY,
     textTTL: { value: 0, unit: 'day' },
+    codeTTL: { value: 10, unit: 'minute' },
+    fileTTL: { value: 0, unit: 'day' },
     pruneDevices: false,
   };
 
@@ -177,7 +335,11 @@ const QSSettings = (() => {
 
   // 页面相关的几个动作由页面注入。默认值是空实现，这样"忘了注入"最多是
   // 少个提示，不会整页炸掉。
+  //
+  // page 是**这块面板属于哪一页**（`files` / `text`），用来把 data-page 的块
+  // 藏掉另一半。留空 = 全显示。
   let host = {
+    page: '',
     getToken: () => '',
     onUnauthorized: () => {},
     onDataDirChanged: async () => {},
@@ -288,11 +450,14 @@ const QSSettings = (() => {
     $('blurRange').disabled = !hasBg;
     $('bgDarkHint').hidden = !(hasBg && effectiveTheme() === 'dark');
 
-    // 文本保留时间
-    const ttl = s.textTTL || { value: 0, unit: 'day' };
-    $('ttlValue').value = Number(ttl.value) || 0;
-    $('ttlUnit').value = ttl.unit === 'hour' ? 'hour' : 'day';
-    syncTTLHint();
+    // 三档保留时长一起回显。缺字段时退回 spec.def——服务端还没升级、或者
+    // 页面自己那次"只带外观"的 apply，都可能不带这几项；用默认值不会写错方向。
+    for (const spec of TTL_SPECS) {
+      const t = s[spec.key] || spec.def;
+      $(spec.valueId).value = Number(t.value) || 0;
+      $(spec.unitId).value = ttlUnitValid(t.unit) ? t.unit : spec.def.unit;
+      syncTTLHint(spec);
+    }
 
     // 设备记录：跟 #themeSeg 一样是分段控件，省得为一个布尔开关另写一套
     // switch 组件、再补一遍两套主题的对比度
@@ -307,26 +472,27 @@ const QSSettings = (() => {
 
   // 把当前填的保留时长写成一句人话。
   //
-  // 0 必须明确说成"不自动删除"——只写个 0 或者"0 天"，用户会理解成"立刻就删"。
-  function syncTTLHint() {
-    const v = Number($('ttlValue').value) || 0;
-    const unit = $('ttlUnit').value === 'hour' ? '小时' : '天';
-    $('ttlHintText').textContent = v > 0
-      ? `超过 ${v} ${unit}的文本会被自动删除`
-      : '不自动删除，文本会一直留着';
+  // 0 必须明确说成"不自动删除"（验证码那档是"不特殊处理"）——只写个 0 或者
+  // "0 天"，用户会理解成"立刻就删"，方向正好相反。所以文案按 spec 分开写。
+  function syncTTLHint(spec) {
+    const v = Number($(spec.valueId).value) || 0;
+    const unit = ttlUnitLabel($(spec.unitId).value);
+    $(spec.hintId).textContent = v > 0
+      ? `${spec.lead} ${v} ${unit}${spec.subject}`
+      : spec.zero;
   }
 
   // 保存保留时长。数字和单位是一组，所以用「应用」按钮提交，
   // 而不是像滑块那样改完就发——否则改单位的一瞬间会用一个半截的值落库。
-  async function saveTTL() {
-    const raw = $('ttlValue').value.trim();
+  async function saveTTL(spec) {
+    const raw = $(spec.valueId).value.trim();
     const value = raw === '' ? 0 : Number(raw);
     if (!Number.isInteger(value) || value < 0 || value > 10000) {
       toast('保留时长要填 0 到 10000 之间的整数', 'err');
       return;
     }
-    await save({ textTTL: { value, unit: $('ttlUnit').value } });
-    toast(value > 0 ? '已开启自动清理' : '已关闭自动清理', 'ok');
+    await save({ [spec.key]: { value, unit: $(spec.unitId).value } });
+    toast(value > 0 ? spec.onToast : spec.zeroToast, 'ok');
   }
 
   // 本地即时预览：拖动滑块时先把效果套上去，不发请求。
@@ -636,13 +802,15 @@ const QSSettings = (() => {
       if (e.key === 'Enter') applyDataDir();
     });
 
-    // 文本保留时间
-    $('ttlSave').addEventListener('click', saveTTL);
-    $('ttlValue').addEventListener('input', syncTTLHint);
-    $('ttlUnit').addEventListener('change', syncTTLHint);
-    $('ttlValue').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') saveTTL();
-    });
+    // 三档保留时长，同一个套路
+    for (const spec of TTL_SPECS) {
+      $(spec.saveId).addEventListener('click', () => saveTTL(spec));
+      $(spec.valueId).addEventListener('input', () => syncTTLHint(spec));
+      $(spec.unitId).addEventListener('change', () => syncTTLHint(spec));
+      $(spec.valueId).addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') saveTTL(spec);
+      });
+    }
 
     // 设备记录：点一下即落库（和主题一样，没有"半截值"的问题，不需要应用按钮）
     $('pruneSeg').addEventListener('click', (e) => {
@@ -661,9 +829,25 @@ const QSSettings = (() => {
 
   // ---------------------------------------------------------------- 入口
 
+  // 带 data-page 的块只在自己那页显示（没标的 = 两页都显示）。
+  //
+  // 用 hidden 属性而不是给 <html> 挂 class：`[hidden]{display:none!important}`
+  // 样式表里已经有了，不必为此去改两个页面共用的 style.css，也不必让每个 HTML
+  // 各记一份页面标识——那种"两份要同步"的东西迟早分叉。
+  //
+  // host.page 为空时**整块都不动**：宁可在不该显示的页上多显示几行，也不要
+  // 因为某个页面忘了传标识，让整个设置面板空掉。
+  function applyPage(page) {
+    if (!page) return;
+    document.querySelectorAll('#overlay [data-page]').forEach((el) => {
+      el.hidden = el.getAttribute('data-page') !== page;
+    });
+  }
+
   function init(h) {
     host = Object.assign({}, host, h || {});
     mount();
+    applyPage(host.page);
     bind();
     if (location.hash === '#settings') open(true);
     return settings;
@@ -677,6 +861,15 @@ const QSSettings = (() => {
     saveTheme,
     syncThemeUI,
     effectiveTheme,
+    // 两页共用的小工具：单位人话写法、剩余时间、单条保留时长的就地编辑器
+    ttlUnitText,
+    fmtLeft,
+    secsToTtl,
+    ttlToSecs,
+    followNote,
+    ttlFieldsMarkup,
+    ttlEditorMarkup,
+    readTtlEditor,
     get settings() { return settings; },
   };
 })();

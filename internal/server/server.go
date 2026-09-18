@@ -193,6 +193,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", s.admin(s.handleStats))
 	mux.HandleFunc("GET /api/files", s.admin(s.handleListFiles))
 	mux.HandleFunc("DELETE /api/files/{id}", s.admin(s.handleDeleteFile))
+	// 改单个文件的保留时长。跟文本那边一样，只动这一条、不动全局设置。
+	mux.HandleFunc("PUT /api/files/{id}", s.admin(s.handleSetFileTTL))
 
 	// 共享文本（便签）。跟文件列表同级，同样走管理权限包装。
 	mux.HandleFunc("GET /api/texts", s.admin(s.handleListTexts))
@@ -307,31 +309,37 @@ func (s *Server) runCleanup() {
 		}
 	}
 	s.purgeTexts(b)
+	s.purgeFiles(b)
 }
 
-// purgeTexts 按设置里的保留时长清理文本。没设（或设成 0）就什么都不做。
+// purgeTexts 按保留规则清理文本。三档都没启用就什么都不做。
 //
 // 定时器是 10 分钟一轮，所以实际删除时刻会比设定值晚最多 10 分钟。
 // 对"留 1 小时"这种场景是可以接受的误差，不值得为它把轮询调密——
 // 那会让空闲实例每几分钟就查一次库。
+//
+// 注意验证码那档默认是**开着**的（10 分钟），所以升级上来之后，"长得像验证码"
+// 的文本会开始被自动清掉。这是设计如此，不是 bug。
 func (s *Server) purgeTexts(b *backend) {
 	kv, err := b.st.GetSettings()
 	if err != nil {
+		// 读设置失败不能 return 掉整个清理——上传清理在它前面跑，
+		// 但文件清理在它后面。这里只跳过文本这一段。
 		log.Printf("读取文本保留设置失败: %v", err)
 		return
 	}
-	ttl, ok := textTTLFrom(kv)
-	if !ok {
-		return // 未设置 = 永不自动删除
+	p := policyFrom(kv)
+	if p.text <= 0 && p.code <= 0 {
+		return // 两档都没启用 = 永不自动删除
 	}
 
-	n, err := b.st.PurgeTexts(time.Now().Add(-ttl))
+	n, err := b.st.PurgeTexts(time.Now(), p.textSeconds(), p.codeSeconds())
 	if err != nil {
 		log.Printf("清理过期文本失败: %v", err)
 		return
 	}
 	if n > 0 {
-		log.Printf("已清理 %d 条过期文本（保留 %s）", n, ttl)
+		log.Printf("已清理 %d 条过期文本", n)
 		// 让打开的页面跟着把这几条抹掉，不然它们会一直挂在界面上，
 		// 用户点进去才发现已经没了
 		s.events.notify(topicTexts)
@@ -339,6 +347,45 @@ func (s *Server) purgeTexts(b *backend) {
 		// 不然过一阵子回来一看：文本早清光了，设备列表里还挂着一堆空设备，
 		// 而用户并没有手动删过任何东西——最莫名其妙的正是这种。
 		s.pruneDevicesIfEnabled()
+	}
+}
+
+// purgeFiles 按保留规则清理文件。
+//
+// 跟文本那边一样是"单条 > 全局"两档（文件没有验证码那一档）。
+// 库里的记录和磁盘上的本体必须一起删：只删库会留下永远没人认领的垃圾文件，
+// 只删文件则列表里还挂着一个点开就 404 的条目。
+func (s *Server) purgeFiles(b *backend) {
+	kv, err := b.st.GetSettings()
+	if err != nil {
+		log.Printf("读取文件保留设置失败: %v", err)
+		return
+	}
+	p := policyFrom(kv)
+	// 这里**不**因为全局那档没启用就提前返回：某几条文件可能自己设了保留时长，
+	// 全局为 0 时照样得按它们各自的时长清。传 0 进去，store 会把全局那档
+	// 折算成"永不命中"。
+	ids, err := b.st.ExpiredFiles(time.Now(), p.fileSeconds())
+	if err != nil {
+		log.Printf("查询过期文件失败: %v", err)
+		return
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	gone := 0
+	for _, id := range ids {
+		if err := b.st.DeleteFile(id); err != nil {
+			continue
+		}
+		_ = os.Remove(b.filePath(id))
+		_ = os.RemoveAll(b.chunkDir(id))
+		gone++
+	}
+	if gone > 0 {
+		log.Printf("已清理 %d 个过期文件", gone)
+		s.events.notify(topicFiles)
 	}
 }
 
@@ -434,6 +481,12 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// 保留规则整份读一次，逐条复用（跟文本列表同一个做法）
+	p, err := s.loadTTLPolicy()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	type dto struct {
 		ID        string `json:"id"`
 		Name      string `json:"name"`
@@ -441,16 +494,72 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
 		Mime      string `json:"mime"`
 		CreatedAt int64  `json:"createdAt"`
 		URL       string `json:"url"`
+		// TTLSeconds 是这条自己的保留时长，0 = 跟随全局。前端拿它回填编辑框。
+		TTLSeconds int64 `json:"ttlSeconds"`
+		// ExpiresAt 是到期时刻（unix 秒），**0 表示永不删除**。
+		ExpiresAt int64 `json:"expiresAt"`
 	}
 	out := make([]dto, 0, len(files))
 	for _, f := range files {
 		out = append(out, dto{
 			ID: f.ID, Name: f.Name, Size: f.Size, Mime: f.Mime,
-			CreatedAt: f.CreatedAt.Unix(),
-			URL:       "/f/" + f.ID + "/" + urlEscape(f.Name),
+			CreatedAt:  f.CreatedAt.Unix(),
+			URL:        "/f/" + f.ID + "/" + urlEscape(f.Name),
+			TTLSeconds: f.TTLSeconds,
+			ExpiresAt:  p.fileExpiry(f),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleSetFileTTL 改一个文件自己的保留时长。
+//
+// 单独一个接口而不是塞进 PUT /api/files/{id}：文件那侧目前只有"删"这一个写操作，
+// 为它造一个只认一个字段的 PUT 不如直接给个语义明确的路径。
+// ttlSeconds 为 0 表示改回"跟随全局设置"。
+func (s *Server) handleSetFileTTL(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		TTLSeconds *int64 `json:"ttlSeconds"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体解析失败")
+		return
+	}
+	if in.TTLSeconds == nil {
+		writeErr(w, http.StatusBadRequest, "缺少 ttlSeconds")
+		return
+	}
+	if v := *in.TTLSeconds; v < 0 || v > maxItemTTLSeconds {
+		writeErr(w, http.StatusBadRequest,
+			"保留时长取值范围是 0 到 "+strconv.FormatInt(maxItemTTLSeconds, 10)+
+				" 秒（0 表示跟随全局设置）")
+		return
+	}
+
+	b := s.be()
+	id := r.PathValue("id")
+	if err := b.st.SetFileTTL(id, *in.TTLSeconds); err != nil {
+		writeStoreErr(w, err, "文件不存在")
+		return
+	}
+
+	f, err := b.st.GetFile(id)
+	if err != nil {
+		writeStoreErr(w, err, "文件不存在")
+		return
+	}
+	p, err := s.loadTTLPolicy()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	s.events.notify(topicFiles)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":         f.ID,
+		"ttlSeconds": f.TTLSeconds,
+		"expiresAt":  p.fileExpiry(f),
+	})
 }
 
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {

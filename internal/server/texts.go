@@ -37,6 +37,9 @@ const unknownDevice = "未知设备"
 //
 // DeviceName 由服务端算好：UA 解析的逻辑只该有一份，放前端的话
 // 首页和文本页迟早各写一套、解析结果还不一样。
+//
+// ExpiresAt 同理：它取决于"单条 > 验证码 > 全局"这套优先级，放前端算等于
+// 把规则抄第二份，两边迟早不一致。前端只负责把 unix 秒差成"还剩 X 天"。
 type textDTO struct {
 	ID         string `json:"id"`
 	Content    string `json:"content"`
@@ -44,6 +47,27 @@ type textDTO struct {
 	DeviceName string `json:"deviceName"`
 	CreatedAt  int64  `json:"createdAt"`
 	UpdatedAt  int64  `json:"updatedAt"`
+	// TTLSeconds 是这条自己的保留时长，0 = 跟随全局。前端拿它回填编辑框。
+	TTLSeconds int64 `json:"ttlSeconds"`
+	// IsCode 表示这条被判定为验证码（界面上会标出来）。
+	IsCode bool `json:"isCode"`
+	// ExpiresAt 是到期时刻（unix 秒），**0 表示永不删除**。
+	ExpiresAt int64 `json:"expiresAt"`
+}
+
+// textDTOOf 把一条文本转成对外的视图。三处构造点共用，避免哪一处漏了新字段。
+func textDTOOf(t *store.Text, label string, p ttlPolicy) textDTO {
+	return textDTO{
+		ID:         t.ID,
+		Content:    t.Content,
+		DeviceID:   t.DeviceID,
+		DeviceName: label,
+		CreatedAt:  t.CreatedAt.Unix(),
+		UpdatedAt:  t.UpdatedAt.Unix(),
+		TTLSeconds: t.TTLSeconds,
+		IsCode:     t.IsCode,
+		ExpiresAt:  p.textExpiry(t),
+	}
 }
 
 func (s *Server) handleListTexts(w http.ResponseWriter, r *http.Request) {
@@ -66,16 +90,16 @@ func (s *Server) handleListTexts(w http.ResponseWriter, r *http.Request) {
 		byID[d.ID] = d
 	}
 
+	// 保留规则也整份读一次，而不是逐条去查设置
+	p, err := s.loadTTLPolicy()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	out := make([]textDTO, 0, len(texts))
 	for _, t := range texts {
-		out = append(out, textDTO{
-			ID:         t.ID,
-			Content:    t.Content,
-			DeviceID:   t.DeviceID,
-			DeviceName: deviceLabel(byID[t.DeviceID]),
-			CreatedAt:  t.CreatedAt.Unix(),
-			UpdatedAt:  t.UpdatedAt.Unix(),
-		})
+		out = append(out, textDTOOf(t, deviceLabel(byID[t.DeviceID]), p))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -133,6 +157,8 @@ func (s *Server) handleCreateText(w http.ResponseWriter, r *http.Request) {
 		DeviceID:  ip,
 		CreatedAt: now,
 		UpdatedAt: now,
+		// 判定只在这里做一次，结果落库（见 looksLikeCode 的说明）。
+		IsCode: looksLikeCode(in.Content),
 	}
 	if err := b.st.CreateText(t); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -140,37 +166,71 @@ func (s *Server) handleCreateText(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.events.notify(topicTexts)
-	writeJSON(w, http.StatusOK, textDTO{
-		ID: t.ID, Content: t.Content, DeviceID: t.DeviceID,
-		DeviceName: s.deviceLabelOf(t.DeviceID),
-		CreatedAt:  t.CreatedAt.Unix(), UpdatedAt: t.UpdatedAt.Unix(),
-	})
+
+	p, err := s.loadTTLPolicy()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, textDTOOf(t, s.deviceLabelOf(t.DeviceID), p))
 }
 
-// handleUpdateText 改一条文本的内容。
+// handleUpdateText 改一条文本：内容、保留时长，或两者一起。
+//
+// 两个字段都做成可选（指针），但至少要传一个。分开传是为了让"只改保留时长"
+// 不必把内容也回传一遍：内容可能几 KB，而且回传等于把两件无关的改动绑在
+// 一次请求里——以后想在列表里直接改保留时长，就得先拿到内容。
 func (s *Server) handleUpdateText(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Content string `json:"content"`
+		Content    *string `json:"content"`
+		TTLSeconds *int64  `json:"ttlSeconds"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败")
 		return
 	}
-	if strings.TrimSpace(in.Content) == "" {
-		writeErr(w, http.StatusBadRequest, "内容不能为空")
+	if in.Content == nil && in.TTLSeconds == nil {
+		writeErr(w, http.StatusBadRequest, "没有要修改的字段")
 		return
 	}
-	if len(in.Content) > maxTextLen {
-		writeErr(w, http.StatusRequestEntityTooLarge,
-			"文本不能超过 "+humanSize(maxTextLen))
-		return
+
+	// 先全部校验完再落库，避免"内容写进去了、保留时长被拒了"这种半截状态
+	if in.Content != nil {
+		if strings.TrimSpace(*in.Content) == "" {
+			writeErr(w, http.StatusBadRequest, "内容不能为空")
+			return
+		}
+		if len(*in.Content) > maxTextLen {
+			writeErr(w, http.StatusRequestEntityTooLarge,
+				"文本不能超过 "+humanSize(maxTextLen))
+			return
+		}
+	}
+	if in.TTLSeconds != nil {
+		if v := *in.TTLSeconds; v < 0 || v > maxItemTTLSeconds {
+			writeErr(w, http.StatusBadRequest,
+				"保留时长取值范围是 0 到 "+strconv.Itoa(maxItemTTLSeconds)+
+					" 秒（0 表示跟随全局设置）")
+			return
+		}
 	}
 
 	b := s.be()
 	id := r.PathValue("id")
-	if err := b.st.UpdateText(id, in.Content); err != nil {
-		writeStoreErr(w, err, "文本不存在")
-		return
+
+	if in.Content != nil {
+		// 内容变了，"像不像验证码"要重新判定——否则把一条普通文本改成
+		// "123456" 之后它仍然按普通文本的规则保留，用户会觉得验证码规则时灵时不灵。
+		if err := b.st.UpdateText(id, *in.Content, looksLikeCode(*in.Content)); err != nil {
+			writeStoreErr(w, err, "文本不存在")
+			return
+		}
+	}
+	if in.TTLSeconds != nil {
+		if err := b.st.SetTextTTL(id, *in.TTLSeconds); err != nil {
+			writeStoreErr(w, err, "文本不存在")
+			return
+		}
 	}
 
 	t, err := b.st.GetText(id)
@@ -180,11 +240,13 @@ func (s *Server) handleUpdateText(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.events.notify(topicTexts)
-	writeJSON(w, http.StatusOK, textDTO{
-		ID: t.ID, Content: t.Content, DeviceID: t.DeviceID,
-		DeviceName: s.deviceLabelOf(t.DeviceID),
-		CreatedAt:  t.CreatedAt.Unix(), UpdatedAt: t.UpdatedAt.Unix(),
-	})
+
+	p, err := s.loadTTLPolicy()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, textDTOOf(t, s.deviceLabelOf(t.DeviceID), p))
 }
 
 func (s *Server) handleDeleteText(w http.ResponseWriter, r *http.Request) {
@@ -558,37 +620,4 @@ func writeStoreErr(w http.ResponseWriter, err error, notFoundMsg string) {
 		return
 	}
 	writeErr(w, http.StatusInternalServerError, err.Error())
-}
-
-// ---------------------------------------------------------------- 文本保留时长
-
-// TTL 的取值上限。数值本身不大（最多 10000），真正的约束是别让人填一个
-// 天文数字把 time.Duration 乘溢出。
-const maxTTLValue = 10000
-
-// textTTLFrom 从设置里解析出文本保留时长。
-//
-// bool 为 false 表示**没有启用自动清理**——值为空、解析不了、或者 <= 0 都算没启用。
-// 这个方向是刻意保守的：宁可留着让用户手动删，也不要因为一个解析不了的值
-// 就把人家攒的文本清空。
-func textTTLFrom(kv map[string]string) (time.Duration, bool) {
-	n, err := strconv.Atoi(strings.TrimSpace(kv[store.SettingTextTTLValue]))
-	if err != nil || n <= 0 {
-		return 0, false
-	}
-	unit := kv[store.SettingTextTTLUnit]
-	if unit == "" {
-		// 只填了数值、没带单位（手写的请求）时按天算，别让它静默地不生效
-		unit = "day"
-	}
-	switch unit {
-	case "hour":
-		return time.Duration(n) * time.Hour, true
-	case "day":
-		return time.Duration(n) * 24 * time.Hour, true
-	default:
-		// 单位认不出来就当没设置。前端只会写这两个值，
-		// 走到这儿说明库里的值被人手改脏了，那就不动数据。
-		return 0, false
-	}
 }

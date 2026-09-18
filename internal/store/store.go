@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS files (
   chunk_size   INTEGER NOT NULL DEFAULT 0,
   total_chunks INTEGER NOT NULL DEFAULT 0,
   created_at   INTEGER NOT NULL,
+  -- 这条文件自己的保留时长（秒）。0 = 跟随全局设置。
+  -- 存秒数而不是"数值 + 单位"：这里只给机器用，回填到界面时按最合适的单位
+  -- 折算一次就行；全局设置那边存原样是因为要在面板里原样显示。
+  ttl_seconds  INTEGER NOT NULL DEFAULT 0,
   completed_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_files_fp     ON files(fingerprint, status);
@@ -60,6 +64,12 @@ CREATE TABLE IF NOT EXISTS texts (
   id         TEXT    PRIMARY KEY,
   content    TEXT    NOT NULL,
   device_id  TEXT    NOT NULL DEFAULT '',
+  -- 这条文本自己的保留时长（秒）。0 = 跟随全局设置。
+  ttl_seconds INTEGER NOT NULL DEFAULT 0,
+  -- 插入时按内容判定"像不像验证码"，判定逻辑只该有一份（见 server 的
+  -- looksLikeCode）。存下来而不是每次清理时重算：清理是每 10 分钟一轮的
+  -- 全表扫描，而内容一旦写定就不会变，重算是白烧 CPU。
+  is_code    INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -98,7 +108,20 @@ const (
 	//
 	// 值为空或 0 表示**永不自动删除**——这也是默认。
 	SettingTextTTLValue = "text_ttl_value"
-	SettingTextTTLUnit  = "text_ttl_unit" // hour | day
+	SettingTextTTLUnit  = "text_ttl_unit" // minute | hour | day
+
+	// 文件自动清理：跟文本那套完全同构，只是没有"验证码"这一档。
+	// 值为空或 0 表示**永不自动删除**——这也是默认。
+	SettingFileTTLValue = "file_ttl_value"
+	SettingFileTTLUnit  = "file_ttl_unit" // minute | hour | day
+
+	// 验证码过期时间：内容是验证码的文本走这条规则，而不是上面的 text_ttl。
+	//
+	// 和 text_ttl 有一处**语义差别**：这里是"没设过就用默认值 10 分钟"，
+	// 而显式设成 0 表示**关掉这条规则**（验证码按普通文本处理）。所以读的时候
+	// 必须区分"键不存在"和"键存在且为 0"——前者给默认值，后者是关闭。
+	SettingCodeTTLValue = "code_ttl_value"
+	SettingCodeTTLUnit  = "code_ttl_unit" // minute | hour | day
 
 	// SettingPruneDevices 控制"设备随消息删除"：打开之后，删文本时顺手把
 	// 已经没有任何文本的设备记录也删掉。值 "1" 表示开启，其余（含缺省）关闭。
@@ -127,7 +150,70 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("初始化表结构: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("升级表结构: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// migrate 把老库补到当前表结构。
+//
+// 为什么需要它：`schema` 里全是 `CREATE TABLE IF NOT EXISTS`，对**已经存在**的表
+// 它什么都不做——新加的列在老库上永远补不上来，而报错要等到第一次用到那列时才出现
+// （`no such column: ttl_seconds`），看起来像代码写错了。所以建表之后单独走一遍。
+//
+// 逐列查 `PRAGMA table_info` 再决定加不加：SQLite 没有 `ADD COLUMN IF NOT EXISTS`，
+// 直接 ALTER 在第二次启动时就会报 duplicate column name。
+func migrate(db *sql.DB) error {
+	adds := []struct{ table, column, ddl string }{
+		{"files", "ttl_seconds",
+			`ALTER TABLE files ADD COLUMN ttl_seconds INTEGER NOT NULL DEFAULT 0`},
+		{"texts", "ttl_seconds",
+			`ALTER TABLE texts ADD COLUMN ttl_seconds INTEGER NOT NULL DEFAULT 0`},
+		{"texts", "is_code",
+			`ALTER TABLE texts ADD COLUMN is_code INTEGER NOT NULL DEFAULT 0`},
+	}
+	for _, a := range adds {
+		has, err := hasColumn(db, a.table, a.column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.Exec(a.ddl); err != nil {
+			return fmt.Errorf("给 %s 加列 %s: %w", a.table, a.column, err)
+		}
+	}
+	return nil
+}
+
+// hasColumn 查一张表里有没有某一列。表名是上面写死的常量，不来自外部输入，
+// 所以拼进 PRAGMA 是安全的（PRAGMA 本来也不支持占位符）。
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notNull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Close 关闭数据库。
@@ -144,6 +230,8 @@ type File struct {
 	ChunkSize   int64
 	TotalChunks int
 	CreatedAt   time.Time
+	// TTLSeconds 是这条文件自己的保留时长。0 = 跟随全局设置。
+	TTLSeconds int64
 }
 
 // ---------------------------------------------------------------- files
@@ -161,7 +249,7 @@ func (s *Store) CreateUpload(f *File) error {
 // FindResumableUpload 按指纹查找可续传的上传任务。
 func (s *Store) FindResumableUpload(fingerprint string) (*File, error) {
 	row := s.db.QueryRow(
-		`SELECT id, name, size, mime, status, fingerprint, chunk_size, total_chunks, created_at
+		`SELECT id, name, size, mime, status, fingerprint, chunk_size, total_chunks, created_at, ttl_seconds
 		   FROM files WHERE fingerprint = ? AND status = 'uploading'
 		  ORDER BY created_at DESC, rowid DESC LIMIT 1`, fingerprint)
 	return scanFile(row)
@@ -170,7 +258,7 @@ func (s *Store) FindResumableUpload(fingerprint string) (*File, error) {
 // GetFile 按 ID 读取文件记录。
 func (s *Store) GetFile(id string) (*File, error) {
 	row := s.db.QueryRow(
-		`SELECT id, name, size, mime, status, fingerprint, chunk_size, total_chunks, created_at
+		`SELECT id, name, size, mime, status, fingerprint, chunk_size, total_chunks, created_at, ttl_seconds
 		   FROM files WHERE id = ?`, id)
 	return scanFile(row)
 }
@@ -181,7 +269,7 @@ func (s *Store) GetFile(id string) (*File, error) {
 // 顺序不作保证，列表就会"跳"，所以再拿自增的 rowid 兜底：rowid 越大越新。
 func (s *Store) ListFiles() ([]*File, error) {
 	rows, err := s.db.Query(
-		`SELECT id, name, size, mime, status, fingerprint, chunk_size, total_chunks, created_at
+		`SELECT id, name, size, mime, status, fingerprint, chunk_size, total_chunks, created_at, ttl_seconds
 		   FROM files WHERE status = 'ready'
 		  ORDER BY created_at DESC, rowid DESC`)
 	if err != nil {
@@ -258,11 +346,71 @@ func (s *Store) StaleUploads(ttl time.Duration) ([]string, error) {
 	return ids, rows.Err()
 }
 
+// SetFileTTL 改一条文件自己的保留时长。0 表示改回"跟随全局设置"。
+func (s *Store) SetFileTTL(id string, seconds int64) error {
+	return s.setTTL("files", id, seconds)
+}
+
+// setTTL 是 files / texts 共用的"改单条保留时长"。
+//
+// 表名只来自上面两个写死的调用点，不来自外部输入，拼进 SQL 是安全的。
+// RowsAffected == 0 必须转成 ErrNotFound：SQLite 对"改一个不存在的 ID"不报错，
+// 不转的话接口会对着不存在的记录回 200，前端以为改成功了。
+func (s *Store) setTTL(table, id string, seconds int64) error {
+	res, err := s.db.Exec(
+		`UPDATE `+table+` SET ttl_seconds = ? WHERE id = ?`, seconds, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ExpiredFiles 返回已过期的文件 ID。
+//
+// 优先级跟文本那边一致：**单条 ttl_seconds > 全局 file_ttl**（文件没有验证码
+// 那一档）。fileSec <= 0 表示全局那条规则没启用，折算成截止时刻 0 ——
+// created_at 是正的 unix 秒，`created_at < 0` 恒为假，正好等于不删。
+//
+// 只返回 ID 而不是顺手删掉：文件本体在磁盘上，删库和删文件必须一起做，
+// 而 store 层不碰磁盘（那是 server 的事）。跟 StaleUploads 同一个套路。
+func (s *Store) ExpiredFiles(now time.Time, fileSec int64) ([]string, error) {
+	globalCut := int64(0)
+	if fileSec > 0 {
+		globalCut = now.Unix() - fileSec
+	}
+	rows, err := s.db.Query(
+		`SELECT id FROM files WHERE status = 'ready' AND (
+		   (ttl_seconds > 0 AND created_at + ttl_seconds < ?)
+		   OR (ttl_seconds = 0 AND created_at < ?)
+		 )`, now.Unix(), globalCut)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func scanFile(sc interface{ Scan(...any) error }) (*File, error) {
 	var f File
 	var created int64
 	err := sc.Scan(&f.ID, &f.Name, &f.Size, &f.Mime, &f.Status,
-		&f.Fingerprint, &f.ChunkSize, &f.TotalChunks, &created)
+		&f.Fingerprint, &f.ChunkSize, &f.TotalChunks, &created, &f.TTLSeconds)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

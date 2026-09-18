@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"quickshare/internal/store"
 )
@@ -143,10 +145,12 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			Files  *int `json:"files"`
 		} `json:"opacity"`
 		// 文本保留时长。value 为 0 表示永不自动删除（默认）。
-		TextTTL *struct {
-			Value *int    `json:"value"`
-			Unit  *string `json:"unit"`
-		} `json:"textTTL"`
+		TextTTL *ttlInput `json:"textTTL"`
+		// 文件保留时长。value 为 0 表示永不自动删除（默认）。
+		FileTTL *ttlInput `json:"fileTTL"`
+		// 验证码文本的保留时长。**这里的 0 是"关掉这条规则"**（验证码按普通
+		// 文本处理），不是"永不删除"——所以它跟上面两档的 0 含义不同。
+		CodeTTL *ttlInput `json:"codeTTL"`
 		// 设备随消息删除：删文本时顺手把已经没有任何文本的设备记录也删掉。
 		PruneDevices *bool `json:"pruneDevices"`
 	}
@@ -196,22 +200,19 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if ttl := in.TextTTL; ttl != nil {
-		if ttl.Value != nil {
-			// 0 是合法值，表示关闭自动清理
-			if v := *ttl.Value; v < 0 || v > maxTTLValue {
-				writeErr(w, http.StatusBadRequest,
-					"保留时长取值范围是 0 到 "+strconv.Itoa(maxTTLValue)+"（0 表示永不删除）")
-				return
-			}
-			updates[store.SettingTextTTLValue] = strconv.Itoa(*ttl.Value)
-		}
-		if ttl.Unit != nil {
-			if u := *ttl.Unit; u != "hour" && u != "day" {
-				writeErr(w, http.StatusBadRequest, "单位只能是 hour 或 day")
-				return
-			}
-			updates[store.SettingTextTTLUnit] = *ttl.Unit
+	for _, f := range []struct {
+		in       *ttlInput
+		valueKey string
+		unitKey  string
+		zeroNote string
+	}{
+		{in.TextTTL, store.SettingTextTTLValue, store.SettingTextTTLUnit, "0 表示永不删除"},
+		{in.FileTTL, store.SettingFileTTLValue, store.SettingFileTTLUnit, "0 表示永不删除"},
+		{in.CodeTTL, store.SettingCodeTTLValue, store.SettingCodeTTLUnit, "0 表示关掉这条规则"},
+	} {
+		if msg := applyTTL(updates, f.in, f.valueKey, f.unitKey, f.zeroNote); msg != "" {
+			writeErr(w, http.StatusBadRequest, msg)
+			return
 		}
 	}
 
@@ -245,13 +246,6 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) settingsDTO(kv map[string]string) map[string]any {
-	// 单位认不出来（含从没设过）时回落到 day：值为 0 才是"不清理"，
-	// 单位本身不该成为"设了却不生效"的原因。
-	ttlUnit := kv[store.SettingTextTTLUnit]
-	if ttlUnit != "hour" && ttlUnit != "day" {
-		ttlUnit = "day"
-	}
-
 	out := map[string]any{
 		"theme":      kv[store.SettingTheme],
 		"background": nil,
@@ -261,9 +255,19 @@ func (s *Server) settingsDTO(kv map[string]string) map[string]any {
 			"upload": intOr(kv[store.SettingOpacityUpload], defaultOpacity),
 			"files":  intOr(kv[store.SettingOpacityFiles], defaultOpacity),
 		},
+		// 单位认不出来（含从没设过）时回落到该档的默认单位：值为 0 才是"不清理"，
+		// 单位本身不该成为"设了却不生效"的原因。
 		"textTTL": map[string]any{
 			"value": intOr(kv[store.SettingTextTTLValue], 0),
-			"unit":  ttlUnit,
+			"unit":  ttlUnitOr(kv[store.SettingTextTTLUnit], "day"),
+		},
+		"fileTTL": map[string]any{
+			"value": intOr(kv[store.SettingFileTTLValue], 0),
+			"unit":  ttlUnitOr(kv[store.SettingFileTTLUnit], "day"),
+		},
+		"codeTTL": map[string]any{
+			"value": codeTTLValueOr(kv),
+			"unit":  ttlUnitOr(kv[store.SettingCodeTTLUnit], "minute"),
 		},
 		"pruneDevices": kv[store.SettingPruneDevices] == "1",
 	}
@@ -275,6 +279,65 @@ func (s *Server) settingsDTO(kv map[string]string) map[string]any {
 		}
 	}
 	return out
+}
+
+// codeTTLValueOr 取验证码保留时长的数值。
+//
+// 跟另外两档不同：键**不存在**时给默认值 10（分钟），而键存在且为 0 表示
+// 关掉这条规则。所以不能直接用 intOr —— 它分不清"没设过"和"设成 0"。
+func codeTTLValueOr(kv map[string]string) int {
+	if strings.TrimSpace(kv[store.SettingCodeTTLValue]) == "" {
+		return int(defaultCodeTTL / time.Minute)
+	}
+	return intOr(kv[store.SettingCodeTTLValue], 0)
+}
+
+// ttlInput 是请求体里一档保留时长的形状。两个字段都可选（指针），
+// 只传一个时另一个保持原样——用户往往只想改数值、不想动单位。
+type ttlInput struct {
+	Value *int    `json:"value"`
+	Unit  *string `json:"unit"`
+}
+
+// applyTTL 校验一档保留时长并写进 updates，返回错误信息（空串表示通过）。
+//
+// zeroNote 是"0 代表什么"的说明，只用来拼报错文案：文本和文件那两档的 0 是
+// "永不删除"，验证码那档的 0 是"关掉规则"，文案说错会让人按错的方向理解。
+func applyTTL(updates map[string]string, in *ttlInput, valueKey, unitKey, zeroNote string) string {
+	if in == nil {
+		return ""
+	}
+	if in.Value != nil {
+		// 0 是合法值，含义见 zeroNote
+		if v := *in.Value; v < 0 || v > maxTTLValue {
+			return "保留时长取值范围是 0 到 " + strconv.Itoa(maxTTLValue) +
+				"（" + zeroNote + "）"
+		}
+		updates[valueKey] = strconv.Itoa(*in.Value)
+	}
+	if in.Unit != nil {
+		if !validTTLUnit(*in.Unit) {
+			return "单位只能是 minute、hour 或 day"
+		}
+		updates[unitKey] = *in.Unit
+	}
+	return ""
+}
+
+// validTTLUnit 判断单位认不认识。
+//
+// 加 "minute" 是为了验证码那档：默认 10 分钟用"天"根本表达不出来。
+// 顺带让文本和文件那两档也能填分钟——它们本来就有短保留的需求。
+func validTTLUnit(u string) bool {
+	return u == "minute" || u == "hour" || u == "day"
+}
+
+// ttlUnitOr 取单位，认不出来就用该档的默认值。
+func ttlUnitOr(v, def string) string {
+	if validTTLUnit(v) {
+		return v
+	}
+	return def
 }
 
 // intOr 把设置里存的字符串转成整数，解析不了就退回默认值。

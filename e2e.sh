@@ -498,6 +498,11 @@ chk "二维码接口同样公开 200" "$(code "$A/api/qr?d=hello")" "200"
 chk "版本接口同样公开 200" "$(code "$A/api/version")" "200"
 # 但强制刷新要口令：它会让服务端去访问外网，公开的话局域网里谁都能拿它烧配额。
 chk "强制检查更新受保护 401" "$(code -X POST "$A/api/version/check")" "401"
+# 改单条保留时长也是管理操作：它决定别人的文件什么时候被删掉，不该公开。
+chk "改文件保留时长受保护 401" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":60}' "$A/api/files/nope")" "401"
+chk "改文本保留时长受保护 401" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":60}' "$A/api/texts/nope")" "401"
 chk "带口令强制检查更新 200" \
   "$(code -X POST -H 'X-Admin-Token: secret123' "$A/api/version/check")" "200"
 # SSE 则相反：它暴露的是"这个实例正在被使用"这类活动信息，跟列表同级，要口令。
@@ -1235,6 +1240,167 @@ if [ "$OWN" = "1" ]; then
   chk "关掉更新检查后不提示有更新" "$(printf '%s' "$VER" | jget hasUpdate)" "False"
   chk "强制刷新接口能用（无口令实例）" "$(code -X POST "$B/api/version/check")" "200"
 fi
+
+# ---------------------------------------------------------------- 23
+echo
+echo "=== 23. 保留时长：文件 / 文本 / 验证码三档 ==="
+
+# 从 /api/files 里取某个文件的字段。用 sys.argv 传参而不是往 python 源码里插字符串，
+# 免得 id 里出现引号时把脚本拼坏。
+fget() { curl -s "$B/api/files" | "$PY" -c '
+import sys, json
+f = [x for x in json.load(sys.stdin) if x["id"] == sys.argv[1]][0]
+print(f[sys.argv[2]])
+' "$1" "$2"; }
+# 到期时刻减去创建时刻 = 实际生效的保留秒数。用它验"单条覆盖压过全局"，
+# 比直接读 ttlSeconds 更有意义：ttlSeconds=0 时前者是全局值、后者是 0。
+fspan() { curl -s "$B/api/files" | "$PY" -c '
+import sys, json
+f = [x for x in json.load(sys.stdin) if x["id"] == sys.argv[1]][0]
+print(f["expiresAt"] - f["createdAt"])
+' "$1"; }
+tget() { curl -s "$B/api/texts" | "$PY" -c '
+import sys, json
+t = [x for x in json.load(sys.stdin) if x["id"] == sys.argv[1]][0]
+print(t[sys.argv[2]])
+' "$1" "$2"; }
+tspan() { curl -s "$B/api/texts" | "$PY" -c '
+import sys, json
+t = [x for x in json.load(sys.stdin) if x["id"] == sys.argv[1]][0]
+print(t["expiresAt"] - t["createdAt"])
+' "$1"; }
+
+# --- 三档设置的默认值与 0 的不同含义
+chk "默认 fileTTL.value 为 0" "$(curl -s "$B/api/settings" | jget fileTTL value)" "0"
+chk "默认 fileTTL.unit 为 day" "$(curl -s "$B/api/settings" | jget fileTTL unit)" "day"
+# 验证码那一档的 0 **和另外两档不是一回事**：没设过 = 默认 10 分钟，
+# 显式写 0 = 关掉这条规则。这两件事混了的话，用户明明关掉的规则会悄悄生效，
+# 10 分钟后把刚发的验证码删掉——而界面上看不出任何异常。
+chk "没设过 codeTTL 时回默认 10 分钟" "$(curl -s "$B/api/settings" | jget codeTTL value)" "10"
+chk "没设过 codeTTL 时单位是 minute" "$(curl -s "$B/api/settings" | jget codeTTL unit)" "minute"
+
+# 先把 textTTL 设成和 fileTTL **明显不同**的值，否则"改 fileTTL 顺手把 textTTL 冲掉"
+# 这条根本验不出来：两档恰好相同时，被冲掉了也看不出区别（首版就是这么假绿的）。
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"textTTL":{"value":4,"unit":"day"}}' "$B/api/settings" > /dev/null
+chk "写 fileTTL 3 天 200" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"fileTTL":{"value":3,"unit":"day"}}' "$B/api/settings")" "200"
+chk "读回 fileTTL.value=3" "$(curl -s "$B/api/settings" | jget fileTTL value)" "3"
+chk "改 fileTTL 没顺手把 textTTL 的值冲掉" "$(curl -s "$B/api/settings" | jget textTTL value)" "4"
+chk "改 fileTTL 没顺手把 textTTL 的单位冲掉" "$(curl -s "$B/api/settings" | jget textTTL unit)" "day"
+chk "fileTTL 单位非法被拒 400" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"fileTTL":{"unit":"week"}}' "$B/api/settings")" "400"
+chk "被拒后 fileTTL 没被改动" "$(curl -s "$B/api/settings" | jget fileTTL value)" "3"
+# 「分钟」是这一轮新加的单位（验证码那档默认 10 分钟用"天"表达不出来），三档都得认
+chk "minute 是合法单位" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"fileTTL":{"value":30,"unit":"minute"}}' "$B/api/settings")" "200"
+chk "读回 fileTTL.unit=minute" "$(curl -s "$B/api/settings" | jget fileTTL unit)" "minute"
+
+chk "显式写 codeTTL=0 200" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"codeTTL":{"value":0,"unit":"minute"}}' "$B/api/settings")" "200"
+chk "显式 0 存得住（没被当成「没设过」退回 10）" "$(curl -s "$B/api/settings" | jget codeTTL value)" "0"
+chk "codeTTL 超上限被拒 400" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"codeTTL":{"value":10001}}' "$B/api/settings")" "400"
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"codeTTL":{"value":10,"unit":"minute"}}' "$B/api/settings" > /dev/null
+
+# --- 单条文件覆盖（全局此时是 30 分钟）
+FID=$(put_small "ttl.txt" "hello ttl" "text/plain" | jget id)
+chk "新文件默认跟随全局（ttlSeconds=0）" "$(fget "$FID" ttlSeconds)" "0"
+chk "跟随全局时按全局的 30 分钟算" "$(fspan "$FID")" "1800"
+
+chk "设单条 2 小时 200" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":7200}' "$B/api/files/$FID")" "200"
+chk "单条已落库" "$(fget "$FID" ttlSeconds)" "7200"
+chk "单条压过全局（到期时刻按 2 小时算）" "$(fspan "$FID")" "7200"
+
+chk "单条设回 0 200" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":0}' "$B/api/files/$FID")" "200"
+chk "设回 0 后跟随全局" "$(fspan "$FID")" "1800"
+
+chk "保留秒数为负被拒 400" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":-1}' "$B/api/files/$FID")" "400"
+chk "保留秒数超上限被拒 400" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":1000000000}' "$B/api/files/$FID")" "400"
+chk "被拒后单条值没被改动" "$(fget "$FID" ttlSeconds)" "0"
+# 改一个不存在的 id 必须 404：SQLite 只数 WHERE 命中的行，不自己查就会回 200，
+# 前端以为改成功了
+chk "改不存在的文件 404" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":60}' "$B/api/files/nope")" "404"
+
+# --- 文本：单条覆盖 + 验证码规则
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"textTTL":{"value":2,"unit":"hour"}}' "$B/api/settings" > /dev/null
+TID=$(curl -s -X POST -H 'Content-Type: application/json' -d '{"content":"一条普通文本 ttl"}' \
+  "$B/api/texts" | jget id)
+chk "普通文本默认跟随全局（ttlSeconds=0）" "$(tget "$TID" ttlSeconds)" "0"
+chk "普通文本按全局 2 小时算" "$(tspan "$TID")" "7200"
+chk "普通文本没被标成验证码" "$(tget "$TID" isCode)" "False"
+
+T_BEFORE_UPD=$(tget "$TID" updatedAt)
+chk "只改保留时长 200" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":600}' "$B/api/texts/$TID")" "200"
+chk "文本单条已落库" "$(tget "$TID" ttlSeconds)" "600"
+chk "文本单条压过全局" "$(tspan "$TID")" "600"
+# 只改保留时长不该刷新 updated_at：列表上会平白多出一个「已编辑」，
+# 而用户只是改了个时间
+chk "只改保留时长不刷新 updatedAt" "$(tget "$TID" updatedAt)" "$T_BEFORE_UPD"
+# 一个字段都不传就是没说要改什么，得明确报错而不是静默成功
+chk "两个字段都不传 400" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{}' "$B/api/texts/$TID")" "400"
+chk "改不存在的文本 404" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"ttlSeconds":60}' "$B/api/texts/nope")" "404"
+
+# 内容改了就重新判定"像不像验证码"——否则把普通文本改成 123456 之后，
+# 它仍然按普通文本的规则保留，用户会觉得验证码规则时灵时不灵
+chk "把内容改成 6 位数字 200" \
+  "$(code -X PUT -H 'Content-Type: application/json' -d '{"content":"654321"}' "$B/api/texts/$TID")" "200"
+chk "改成纯数字后被标成验证码" "$(tget "$TID" isCode)" "True"
+# 单条覆盖还在，所以仍然按 10 分钟（单条 > 验证码规则 > 全局）
+chk "单条覆盖仍压过验证码规则" "$(tspan "$TID")" "600"
+
+CODE_ID=$(curl -s -X POST -H 'Content-Type: application/json' -d '{"content":"123456"}' \
+  "$B/api/texts" | jget id)
+chk "纯 6 位数字被识别成验证码" "$(tget "$CODE_ID" isCode)" "True"
+chk "验证码走验证码档（10 分钟）而不是全局的 2 小时" "$(tspan "$CODE_ID")" "600"
+
+SMS_ID=$(curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"content":"【某站】验证码 8842，五分钟内有效"}' "$B/api/texts" | jget id)
+chk "含关键词 + 数字的短信被识别成验证码" "$(tget "$SMS_ID" isCode)" "True"
+
+PLAIN_ID=$(curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"content":"把这段配置贴进 code 段里就好"}' "$B/api/texts" | jget id)
+chk "只是提到 code、没有连续 4 位数字的不算验证码" "$(tget "$PLAIN_ID" isCode)" "False"
+
+# 关掉验证码规则后，验证码按普通文本的全局档走
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"codeTTL":{"value":0,"unit":"minute"}}' "$B/api/settings" > /dev/null
+CODE2=$(curl -s -X POST -H 'Content-Type: application/json' -d '{"content":"987654"}' \
+  "$B/api/texts" | jget id)
+chk "关掉规则后仍会标记 isCode" "$(tget "$CODE2" isCode)" "True"
+chk "关掉规则后验证码按全局 2 小时算" "$(tspan "$CODE2")" "7200"
+
+# 列表接口要把这两个字段带上，否则前端画不出「还剩 X 天」
+chk "文件列表带 ttlSeconds" \
+  "$(curl -s "$B/api/files" | "$PY" -c 'import sys,json;print("ttlSeconds" in json.load(sys.stdin)[0])')" "True"
+chk "文件列表带 expiresAt" \
+  "$(curl -s "$B/api/files" | "$PY" -c 'import sys,json;print("expiresAt" in json.load(sys.stdin)[0])')" "True"
+chk "文本列表带 isCode" \
+  "$(curl -s "$B/api/texts" | "$PY" -c 'import sys,json;print("isCode" in json.load(sys.stdin)[0])')" "True"
+chk "文本列表带 expiresAt" \
+  "$(curl -s "$B/api/texts" | "$PY" -c 'import sys,json;print("expiresAt" in json.load(sys.stdin)[0])')" "True"
+
+# 清理周期是 10 分钟，测试期间不会触发；这里确认"设了 TTL 也不会立刻删东西"，
+# 免得将来有人把清理挪到请求路径上（文件那边尤其危险：删了库里还要删磁盘）
+FILES_BEFORE=$(curl -s "$B/api/files" | jsonlen)
+TEXTS_BEFORE=$(curl -s "$B/api/texts" | jsonlen)
+chk "设了保留时长后文件没被立刻删掉" "$(curl -s "$B/api/files" | jsonlen)" "$FILES_BEFORE"
+chk "设了保留时长后文本没被立刻删掉" "$(curl -s "$B/api/texts" | jsonlen)" "$TEXTS_BEFORE"
+
+# 收尾：把三档都关掉，别给后面的东西留个会自己删数据的实例
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -d '{"textTTL":{"value":0,"unit":"day"},"fileTTL":{"value":0,"unit":"day"},"codeTTL":{"value":0,"unit":"minute"}}' \
+  "$B/api/settings" > /dev/null
 
 echo
 echo "=================================================="

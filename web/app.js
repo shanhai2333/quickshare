@@ -17,6 +17,10 @@ const state = {
   // sort 的真实初值在 bind() 里从 <select> 读——那里才知道用户上次选的是什么。
   query: '',
   sort: 'time-desc',
+
+  // 正在"就地改保留时长"的那个文件的 id（同时只有一个）。列表整块重渲染，
+  // 所以用 id 而不是保存 DOM 引用——重渲染之后引用就失效了。
+  ttlEditId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -232,6 +236,7 @@ function renderFiles() {
     <tr>
       <td>
         <div class="fname">${FILE_ICON}<a href="${url}" target="_blank" rel="noopener" title="${esc(f.name)}">${esc(f.name)}</a></div>
+        ${ttlCell(f)}
       </td>
       <td class="col-hide-sm num">${fmtSize(f.size)}</td>
       <td class="col-hide-sm muted">${fmtTime(f.createdAt)}</td>
@@ -244,6 +249,57 @@ function renderFiles() {
       </td>
     </tr>`;
   }).join('');
+}
+
+// 文件名下面那行「还剩 X 天 / 永久保留」，点一下就地改这个文件的保留时长。
+//
+// 放在文件名格里而不是新加一列：新列在 720px 以下要么被 .col-hide-sm 藏掉
+// （那就再也改不了了）、要么把操作列挤出去。挂在这里窄屏也点得到。
+//
+// expiresAt 是**服务端算好的绝对时刻**，已经把「单条覆盖 > 全局设置」这条优先级
+// 算进去了，所以 0 就真的是"不会自动删"，不用前端再判断一次。
+function ttlCell(f) {
+  if (state.ttlEditId === f.id) {
+    return `<div class="fttl">${QSSettings.ttlEditorMarkup(
+      f.ttlSeconds, QSSettings.followNote('fileTTL'))}</div>`;
+  }
+  const text = Number(f.expiresAt) > 0
+    ? QSSettings.fmtLeft(f.expiresAt)
+    : '永久保留';
+  const title = Number(f.expiresAt) > 0
+    ? '点这里改这个文件的保留时长'
+    : '不会自动删除。点这里给这个文件单独设一个保留时长';
+  return `<div class="fttl"><span class="ttl-chip" data-ttl="${esc(f.id)}" title="${title}">${text}</span></div>`;
+}
+
+// 提交单条文件的保留时长。
+//
+// 值没变就不发请求：服务端改一次就会 notify 一次，别的设备上的列表会跟着抖一下，
+// 而用户其实什么都没改。
+async function saveFileTTL(box) {
+  const id = state.ttlEditId;
+  const f = state.files.find((x) => x.id === id);
+  if (!f || !box) return;
+
+  const r = QSSettings.readTtlEditor(box);
+  if (!r.ok) {
+    toast(r.msg, 'err');
+    return;
+  }
+  if (r.secs === Number(f.ttlSeconds || 0)) {
+    state.ttlEditId = null;
+    renderFiles();
+    return;
+  }
+
+  try {
+    await api('PUT', `/api/files/${encodeURIComponent(id)}`, { ttlSeconds: r.secs });
+    state.ttlEditId = null;
+    toast('保留时长已更新', 'ok');
+    await refreshAll();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
 }
 
 /* ------------------------------------------------------------ 复制与二维码 */
@@ -603,6 +659,26 @@ function bind() {
   });
 
   $('fileRows').addEventListener('click', async (e) => {
+    // 就地改保留时长。放在最前面：这几样都不是按钮，后面的
+    // `closest('button[data-del]')` 也不会误匹配，但顺序清楚点更好读。
+    const chip = e.target.closest('[data-ttl]');
+    if (chip) {
+      state.ttlEditId = chip.getAttribute('data-ttl');
+      renderFiles();
+      const num = document.querySelector('.ttl-edit .ttl-num');
+      if (num) { num.focus(); num.select(); }
+      return;
+    }
+    if (e.target.closest('[data-ttl-save]')) {
+      await saveFileTTL(e.target.closest('.ttl-edit'));
+      return;
+    }
+    if (e.target.closest('[data-ttl-cancel]')) {
+      state.ttlEditId = null;
+      renderFiles();
+      return;
+    }
+
     // 复制下载链接
     const copyBtn = e.target.closest('[data-copy]');
     if (copyBtn) {
@@ -629,12 +705,31 @@ function bind() {
       toast(err.message, 'err');
     }
   });
+
+  // 就地改保留时长时的键盘操作：回车提交、Esc 放弃。
+  //
+  // Esc 要 stopPropagation：设置面板那层在 document 上监听 Esc（见 settings.js），
+  // 不拦住的话，用户按 Esc 想撤掉这个输入框，会顺手把设置面板一起关掉。
+  $('fileRows').addEventListener('keydown', (e) => {
+    if (!e.target.classList || !e.target.classList.contains('ttl-num')) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveFileTTL(e.target.closest('.ttl-edit'));
+    } else if (e.key === 'Escape') {
+      e.stopPropagation();
+      state.ttlEditId = null;
+      renderFiles();
+    }
+  });
 }
 
 // 设置面板（标记 + 事件 + 外观逻辑）都来自 settings.js。这里把首页相关的
 // 几个动作注进去：口令从 state 读；上传背景图撞上 401 要露出登录卡；
 // 换了存储目录之后要把文件列表重新拉一遍。
 QSSettings.init({
+  // 面板里带 data-page 的块按页显示：这一页看得到「文件保留时间」「文件存储位置」
+  // 和「上传区 / 文件列表」两个不透明度滑块；文本页那几块会被藏掉。
+  page: 'files',
   getToken: () => state.token,
   onUnauthorized: showAuth,
   onDataDirChanged: async () => {

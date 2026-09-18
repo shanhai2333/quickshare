@@ -13,6 +13,9 @@ const state = {
   devices: [],
   editingId: null,
   ttl: { value: 0, unit: 'day' },
+  // 验证码那一档（服务端默认 10 分钟）。它只影响"被识别成验证码"的那几条，
+  // 所以列表头那句提示要把它单独说出来，不然用户会以为整页都是这个时长。
+  codeTTL: { value: 10, unit: 'minute' },
 
   // 搜索与筛选**全在前端做**：文本已经一次性全拉进内存了，本地过滤零延迟，
   // 也不用每敲一个字就发一次请求。文本量（几十到几百条）远没到需要服务端
@@ -198,6 +201,7 @@ async function refreshAll() {
     state.texts = texts || [];
     state.devices = devices || [];
     state.ttl = (settings && settings.textTTL) || { value: 0, unit: 'day' };
+    state.codeTTL = (settings && settings.codeTTL) || { value: 10, unit: 'minute' };
 
     // 选中的条目可能已经不在了（本机删的、或别的设备删的）。不清掉的话
     // 会留下幽灵选中项：计数显示"已选 2 条"，点删除却提示"没选"。
@@ -254,14 +258,18 @@ function renderFilters() {
 
 function renderTTL() {
   const { value, unit } = state.ttl;
+  const code = state.codeTTL;
   const el = $('ttlHint');
-  if (!value) {
-    el.textContent = '永久保留';
-    el.title = '文本不会自动删除。点这里可以在设置里改成按时间自动清理';
-    return;
-  }
-  el.textContent = `保留 ${value} ${unit === 'hour' ? '小时' : '天'}`;
-  el.title = '超过这个时长的文本会被自动删除。点这里可以在设置里调整';
+  const label = QSSettings.ttlUnitText;
+  const base = value ? `保留 ${value} ${label(unit)}` : '永久保留';
+  // 验证码规则开着才提它，关着（0）时提了只会让人以为多了个没开的开关
+  const codeOn = !!(code && Number(code.value) > 0);
+  el.textContent = codeOn
+    ? `${base}（验证码 ${code.value} ${label(code.unit)}）`
+    : base;
+  el.title = value
+    ? '超过这个时长的文本会被自动删除。点这里可以在设置里调整'
+    : '文本不会自动删除。点这里可以在设置里改成按时间自动清理';
 }
 
 /* ------------------------------------------------------------ 渲染 */
@@ -312,17 +320,30 @@ function renderTexts() {
   }
 }
 
+// 这条文本"什么时候会被自动删掉"。expiresAt 是**服务端算好的绝对时刻**，
+// 已经把「单条覆盖 > 验证码规则 > 全局设置」这条优先级算进去了——前端不重算，
+// 否则规则会有两份，迟早不一致。
+function ttlTextOf(t) {
+  return Number(t.expiresAt) > 0 ? QSSettings.fmtLeft(t.expiresAt) : '永久保留';
+}
+
 function renderItem(t) {
   const id = esc(t.id);
   const meta = `<span class="titem-dev">${esc(t.deviceName)}</span>
         <span class="muted">${fmtTime(t.createdAt)}</span>
-        ${t.updatedAt > t.createdAt ? '<span class="titem-tag">已编辑</span>' : ''}`;
+        ${t.updatedAt > t.createdAt ? '<span class="titem-tag">已编辑</span>' : ''}
+        ${t.isCode ? `<span class="ttl-tag-code" title="整条是 4~8 位数字，或短文里出现「验证码」这类关键词并带数字">验证码</span>` : ''}`;
 
   if (state.editingId === t.id) {
     return `
     <div class="titem editing">
       <div class="titem-head">${meta}</div>
       <textarea class="titem-edit" id="edit-${id}" spellcheck="false">${esc(t.content)}</textarea>
+      <div class="titem-ttl-row">
+        <span class="ttl-lead">保留</span>
+        ${QSSettings.ttlFieldsMarkup(t.ttlSeconds)}
+        <span class="ttl-edit-note">${QSSettings.followNote('textTTL')}</span>
+      </div>
       <div class="titem-actions">
         <span class="spacer"></span>
         <button class="btn btn-sm" data-cancel="${id}">取消</button>
@@ -332,7 +353,8 @@ function renderItem(t) {
   }
 
   // 多选模式下只留勾选框：这一行的点击语义变成了"选中/取消"，
-  // 再摆着复制、编辑按钮会让人分不清点哪儿会发生什么。
+  // 再摆着复制、编辑按钮会让人分不清点哪儿会发生什么。保留时长那枚 chip 同理——
+  // 它在多选模式下点了只会变成"选中这条"，留着反而误导。
   if (state.selectMode) {
     const on = state.selected.has(t.id);
     return `
@@ -349,10 +371,16 @@ function renderItem(t) {
   return `
     <div class="titem" data-id="${id}">
       <div class="titem-head">${meta}
+        <span class="ttl-chip" data-ttl-edit="${id}" title="点这里改这条文本的保留时长">${ttlTextOf(t)}</span>
         <span class="spacer"></span>
-        <button class="btn btn-sm btn-icon" data-copy="${id}" title="复制内容">${COPY_ICON}</button>
-        <button class="btn btn-sm" data-edit="${id}">编辑</button>
-        <button class="btn btn-sm btn-danger" data-del="${id}">删除</button>
+        <!-- 三个按钮包一层：窄屏下 .titem-head 会换行，不包的话它们会被拆成
+             "复制 / 编辑 / 删除"散在两行里（实测 390px 下就是这样）。包起来
+             整组一起换行，看着才是有意为之。 -->
+        <span class="titem-btns">
+          <button class="btn btn-sm btn-icon" data-copy="${id}" title="复制内容">${COPY_ICON}</button>
+          <button class="btn btn-sm" data-edit="${id}">编辑</button>
+          <button class="btn btn-sm btn-danger" data-del="${id}">删除</button>
+        </span>
       </div>
       <pre class="titem-body">${esc(t.content)}</pre>
     </div>`;
@@ -578,6 +606,8 @@ async function send() {
 async function saveEdit(id) {
   const el = $('edit-' + id);
   if (!el) return;
+  const t = state.texts.find((x) => x.id === id);
+  if (!t) return;
   const content = el.value;
   if (!content.trim()) {
     toast('内容不能为空，想删就点删除', 'err');
@@ -587,8 +617,30 @@ async function saveEdit(id) {
     toast(`内容超过 ${fmtSize(TEXT_MAX)}，存不下`, 'err');
     return;
   }
+
+  // 保留时长跟内容一起提交（同一个保存按钮），但**只提交真的变了的字段**：
+  //   ① `UpdateText` 会把 updated_at 刷新，只改保留时长却把内容一起发过去，
+  //      列表上会平白多出一个「已编辑」；
+  //   ② 服务端本来就允许只传一个字段。
+  const row = el.closest('.titem').querySelector('.titem-ttl-row');
+  const r = QSSettings.readTtlEditor(row);
+  if (!r.ok) {
+    toast(r.msg, 'err');
+    return;
+  }
+
+  const patch = {};
+  if (content !== t.content) patch.content = content;
+  if (r.secs !== Number(t.ttlSeconds || 0)) patch.ttlSeconds = r.secs;
+  if (!Object.keys(patch).length) {
+    // 什么都没改，就别发请求、也别刷新列表——刷新会让用户以为自己动了什么
+    state.editingId = null;
+    renderTexts();
+    return;
+  }
+
   try {
-    await api('PUT', `/api/texts/${encodeURIComponent(id)}`, { content });
+    await api('PUT', `/api/texts/${encodeURIComponent(id)}`, patch);
     state.editingId = null;
     toast('已保存', 'ok');
     await refreshAll();
@@ -677,6 +729,17 @@ function bind() {
       return;
     }
 
+    // 点「还剩 X 天」那枚 chip = 进编辑（保留时长就在编辑框里），
+    // 不用先找到「编辑」按钮再理解"改保留时长也要点编辑"。
+    const ttlChip = e.target.closest('[data-ttl-edit]');
+    if (ttlChip) {
+      state.editingId = ttlChip.getAttribute('data-ttl-edit');
+      renderTexts();
+      const num = document.querySelector('.titem.editing .ttl-num');
+      if (num) { num.focus(); num.select(); }
+      return;
+    }
+
     const cancelBtn = e.target.closest('[data-cancel]');
     if (cancelBtn) {
       state.editingId = null;
@@ -757,6 +820,10 @@ function bind() {
 // 这里只注入文本页相关的几个动作：口令从 state 读；撞上 401 要露出登录卡；
 // 换了存储目录之后文本列表要重拉。
 QSSettings.init({
+  // 只显示文本页那几块：文本保留时间 / 验证码过期时间 / 设备记录。
+  // 文件保留时间、文件存储位置、以及「上传区/文件列表」两个不透明度滑块
+  // 在这一页会被藏掉（用户要的是"文本页只能看见文本页的设置"）。
+  page: 'text',
   getToken: () => state.token,
   onUnauthorized: showAuth,
   onDataDirChanged: refreshAll,
@@ -775,6 +842,7 @@ QSSettings.init({
   onApplied: (s) => {
     if (!s.textTTL) return;
     state.ttl = s.textTTL;
+    if (s.codeTTL) state.codeTTL = s.codeTTL;
     renderTTL();
   },
 });

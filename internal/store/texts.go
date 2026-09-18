@@ -16,6 +16,11 @@ type Text struct {
 	DeviceID  string // 发送方的设备 ID（客户端 IP，由服务端从连接上推导）
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// TTLSeconds 是这条文本自己的保留时长。0 = 跟随全局设置。
+	TTLSeconds int64
+	// IsCode 表示插入时判定为"像验证码"。判定逻辑在 server 的 looksLikeCode，
+	// 这里只负责存；清理时用它决定走验证码规则还是普通文本规则。
+	IsCode bool
 }
 
 // Device 是一台用过的设备。
@@ -48,7 +53,9 @@ type Device struct {
 func scanText(row interface{ Scan(...any) error }) (*Text, error) {
 	var t Text
 	var created, updated int64
-	if err := row.Scan(&t.ID, &t.Content, &t.DeviceID, &created, &updated); err != nil {
+	var isCode int
+	if err := row.Scan(&t.ID, &t.Content, &t.DeviceID, &created, &updated,
+		&t.TTLSeconds, &isCode); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
@@ -56,10 +63,11 @@ func scanText(row interface{ Scan(...any) error }) (*Text, error) {
 	}
 	t.CreatedAt = time.Unix(created, 0)
 	t.UpdatedAt = time.Unix(updated, 0)
+	t.IsCode = isCode == 1
 	return &t, nil
 }
 
-const textCols = `id, content, device_id, created_at, updated_at`
+const textCols = `id, content, device_id, created_at, updated_at, ttl_seconds, is_code`
 
 // ListTexts 列出全部文本，最新的在前。
 //
@@ -93,18 +101,34 @@ func (s *Store) GetText(id string) (*Text, error) {
 // CreateText 插入一条文本。
 func (s *Store) CreateText(t *Text) error {
 	_, err := s.db.Exec(
-		`INSERT INTO texts (id, content, device_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO texts (id, content, device_id, created_at, updated_at, ttl_seconds, is_code)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.Content, t.DeviceID, t.CreatedAt.Unix(), t.UpdatedAt.Unix(),
+		t.TTLSeconds, boolToInt(t.IsCode),
 	)
 	return err
 }
 
+// SetTextTTL 改一条文本自己的保留时长。0 表示改回"跟随全局设置"。
+func (s *Store) SetTextTTL(id string, seconds int64) error {
+	return s.setTTL("texts", id, seconds)
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // UpdateText 改内容，同时推进 updated_at（列表里要显示"已编辑"）。
-func (s *Store) UpdateText(id, content string) error {
+//
+// isCode 一起写：内容变了，"像不像验证码"的判定结果可能跟着变。判定逻辑在
+// server 那边（store 不做内容判断），这里只负责存。
+func (s *Store) UpdateText(id, content string, isCode bool) error {
 	res, err := s.db.Exec(
-		`UPDATE texts SET content = ?, updated_at = ? WHERE id = ?`,
-		content, time.Now().Unix(), id,
+		`UPDATE texts SET content = ?, updated_at = ?, is_code = ? WHERE id = ?`,
+		content, time.Now().Unix(), boolToInt(isCode), id,
 	)
 	if err != nil {
 		return err
@@ -289,12 +313,33 @@ func (s *Store) DeleteTexts(ids []string) (int, error) {
 	return total, nil
 }
 
-// PurgeTexts 删掉在 before 之前创建的文本，返回删除条数。
+// PurgeTexts 按每条文本自己的规则删掉已过期的，返回删除条数。
+//
+// 优先级：**单条 ttl_seconds > 验证码规则 > 全局 text_ttl**。
+// 单条排最前是有意的：用户为某一条显式指定了时长，那就不该再被"它长得像验证码"
+// 或者全局设置覆盖掉。
 //
 // 按 created_at 算，**不是 updated_at**：用户配的是"这条文本留多久"，
 // 如果编辑一下就续命，"1 小时后自动清掉"就变得不可预测了。
-func (s *Store) PurgeTexts(before time.Time) (int, error) {
-	res, err := s.db.Exec(`DELETE FROM texts WHERE created_at < ?`, before.Unix())
+//
+// textSec / codeSec <= 0 表示那一档没启用。这里把"没启用"折算成截止时刻 0
+// ——created_at 是正的 unix 秒，`created_at < 0` 恒为假，正好等于这一档不删。
+// 这样一条 SQL 就能表达三档，不用把行拉回 Go 里逐条判断。
+func (s *Store) PurgeTexts(now time.Time, textSec, codeSec int64) (int, error) {
+	codeCut, textCut := int64(0), int64(0)
+	if codeSec > 0 {
+		codeCut = now.Unix() - codeSec
+	}
+	if textSec > 0 {
+		textCut = now.Unix() - textSec
+	}
+
+	res, err := s.db.Exec(
+		`DELETE FROM texts WHERE
+		   (ttl_seconds > 0 AND created_at + ttl_seconds < ?)
+		   OR (ttl_seconds = 0 AND is_code = 1 AND created_at < ?)
+		   OR (ttl_seconds = 0 AND is_code = 0 AND created_at < ?)`,
+		now.Unix(), codeCut, textCut)
 	if err != nil {
 		return 0, err
 	}

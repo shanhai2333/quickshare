@@ -39,12 +39,16 @@ func TestTextCRUD(t *testing.T) {
 		t.Fatalf("读回的内容不对: %+v", got)
 	}
 
-	if err := st.UpdateText("t1", "改过了"); err != nil {
+	if err := st.UpdateText("t1", "改过了", true); err != nil {
 		t.Fatalf("更新失败: %v", err)
 	}
 	got, _ = st.GetText("t1")
 	if got.Content != "改过了" {
 		t.Fatalf("更新后内容 = %q，期望 %q", got.Content, "改过了")
+	}
+	// is_code 一起写进去了（改内容可能改变"像不像验证码"的判定）
+	if !got.IsCode {
+		t.Fatalf("更新后 is_code 应当为 true，实际 %+v", got)
 	}
 
 	if err := st.DeleteText("t1"); err != nil {
@@ -62,7 +66,7 @@ func TestTextCRUD(t *testing.T) {
 func TestUpdateDeleteMissingText(t *testing.T) {
 	st := newTestStore(t)
 
-	if err := st.UpdateText("nope", "x"); !errors.Is(err, ErrNotFound) {
+	if err := st.UpdateText("nope", "x", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("改不存在的记录应当返回 ErrNotFound，实际 %v", err)
 	}
 	if err := st.DeleteText("nope"); !errors.Is(err, ErrNotFound) {
@@ -435,7 +439,8 @@ func TestPurgeTexts(t *testing.T) {
 	// 编辑一下就续命会让"1 小时后自动清掉"变得不可预测。
 	mk("old-but-edited", now.Add(-48*time.Hour), now)
 
-	n, err := st.PurgeTexts(now.Add(-24 * time.Hour))
+	// 第二个参数是普通文本那档、第三个是验证码那档；0 表示那一档不启用。
+	n, err := st.PurgeTexts(now, int64((24 * time.Hour).Seconds()), 0)
 	if err != nil {
 		t.Fatalf("清理失败: %v", err)
 	}
@@ -452,12 +457,93 @@ func TestPurgeTexts(t *testing.T) {
 		t.Fatalf("清理后剩下 %v，期望只有 fresh", ids)
 	}
 
-	// 边界：before 正好等于创建时间时不该删（用的是严格小于）
-	n, err = st.PurgeTexts(now.Add(-time.Hour))
+	// 边界：截止时刻正好等于创建时间时不该删（用的是严格小于）
+	n, err = st.PurgeTexts(now, int64(time.Hour.Seconds()), 0)
 	if err != nil {
 		t.Fatalf("边界清理失败: %v", err)
 	}
 	if n != 0 {
-		t.Fatalf("before 等于创建时间时删了 %d 条，期望 0", n)
+		t.Fatalf("截止时刻等于创建时间时删了 %d 条，期望 0", n)
+	}
+}
+
+// 验证码那档规则，以及"单条覆盖优先于验证码规则"。
+//
+// 这三条断言各钉一个方向：验证码规则自己生效、单条覆盖能压过验证码规则、
+// 单条覆盖在全局那档没启用时也照样生效。
+func TestPurgeTextsCodeAndOverride(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	mk := func(id string, created time.Time, ttl int64, isCode bool) {
+		t.Helper()
+		if err := st.CreateText(&Text{
+			ID: id, Content: "内容-" + id, DeviceID: "dev",
+			CreatedAt: created, UpdatedAt: created,
+			TTLSeconds: ttl, IsCode: isCode,
+		}); err != nil {
+			t.Fatalf("插入 %s 失败: %v", id, err)
+		}
+	}
+
+	const codeSec = int64(600) // 10 分钟
+	// 20 分钟前发的验证码：走验证码规则 → 该删
+	mk("code-old", now.Add(-20*time.Minute), 0, true)
+	// 20 分钟前发的普通文本，但全局那档没启用 → 留着
+	mk("plain-old", now.Add(-20*time.Minute), 0, false)
+	// 验证码，但自己设了 2 小时 → 单条覆盖压过验证码规则 → 留着
+	mk("code-with-own-ttl", now.Add(-20*time.Minute), 7200, true)
+	// 普通文本，自己设了 10 分钟 → 全局没启用也要按单条删
+	mk("plain-with-own-ttl", now.Add(-20*time.Minute), 600, false)
+
+	n, err := st.PurgeTexts(now, 0, codeSec)
+	if err != nil {
+		t.Fatalf("清理失败: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("清理行数 = %d，期望 2", n)
+	}
+
+	left, _ := st.ListTexts()
+	got := map[string]bool{}
+	for _, x := range left {
+		got[x.ID] = true
+	}
+	if got["code-old"] || got["plain-with-own-ttl"] {
+		t.Fatalf("该删的没删掉，剩下 %v", got)
+	}
+	if !got["plain-old"] || !got["code-with-own-ttl"] {
+		t.Fatalf("该留的被删了，剩下 %v", got)
+	}
+}
+
+// 显式把 ttl_seconds 设成 0 要能改回"跟随全局"，而不是被当成"永不删除"。
+func TestSetTextTTL(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now()
+	if err := st.CreateText(&Text{
+		ID: "t1", Content: "x", DeviceID: "dev", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("插入失败: %v", err)
+	}
+
+	if err := st.SetTextTTL("t1", 600); err != nil {
+		t.Fatalf("设置保留时长失败: %v", err)
+	}
+	got, _ := st.GetText("t1")
+	if got.TTLSeconds != 600 {
+		t.Fatalf("保留时长 = %d，期望 600", got.TTLSeconds)
+	}
+
+	if err := st.SetTextTTL("t1", 0); err != nil {
+		t.Fatalf("清空保留时长失败: %v", err)
+	}
+	got, _ = st.GetText("t1")
+	if got.TTLSeconds != 0 {
+		t.Fatalf("清空后保留时长 = %d，期望 0", got.TTLSeconds)
+	}
+
+	// 改一个不存在的 ID 要报 ErrNotFound，不能让接口对着不存在的记录回 200
+	if err := st.SetTextTTL("nope", 60); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("改不存在的记录应当返回 ErrNotFound，实际 %v", err)
 	}
 }
