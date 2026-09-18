@@ -205,7 +205,7 @@ Linux `~/.config/quickshare/config.json`）。**这个文件刻意放在数据�
 |---|---|
 | `.docx` / `.pptx` | 浏览器原生不认这些格式。在线预览那类方案（Office Online、Google Docs）要求**文件能被公网访问到**，而这是个内网服务，够不着；纯前端解析库动辄几百 KB，还要引一套构建工具链，与「不引构建工具链」这条相冲 |
 | `.zip` 等压缩包 | 没有可渲染的内容，列个文件清单意义不大 |
-| HTML / JavaScript | 见下——它们连内联都不允许 |
+| HTML / JavaScript | 见下——它们的**真实类型**不允许内联，但**文件**会被当纯文本预览（`.html` / `.js` 都在文本表里，看得到源码、跑不了脚本） |
 
 可预览性由**服务端**判定，前端不自己猜：`GET /api/files` 每条带一个 `preview` 字段
 （`image` / `video` / `audio` / `pdf` / `text`，空串 = 只能下载），前端只认这个字段。
@@ -218,14 +218,44 @@ Linux `~/.config/quickshare/config.json`）。**这个文件刻意放在数据�
 |---|---|
 | 图片（JPEG/PNG/GIF/WebP/AVIF/BMP/TIFF/ICO）、视频、音频、PDF、`text/plain`、CSV、Markdown、JSON | `inline` 预览 |
 | SVG | `inline` 预览，但响应带 `Content-Security-Policy: default-src 'none'; sandbox` |
-| 其余（含 HTML、JavaScript 及各种可执行文件） | `attachment`，只下载 |
+| 其余（含各种可执行文件、压缩包、Office 文档） | `attachment`，只下载 |
+
+注意上面这张表管的是**类型**。**文件**层面还有一层：文本类文件（`.html` / `.py` / `.log` /
+`.yml` / `.xml` / `.js` / `.css` …）在上传时就被规范化成 `text/plain`，于是它们能预览成源码——
+见下面「文本类文件」一节。`text/html` 这个类型本身仍然不在白名单里。
 
 这条规则不是洁癖，是补过一个真实漏洞：早先按 `text/` 前缀判断预览，于是上传的 `.html`
 会在**本站源**里渲染，里面的脚本能读到 `localStorage` 里的管理口令，再以管理员身份
-调所有接口——实测能复现。现在 HTML 落回 `attachment`，SVG 虽然保留预览能力，但被
+调所有接口——实测能复现。现在 `text/html` 这个类型不在白名单里（HTML **文件**则被规范成
+`text/plain`，只读不执行），SVG 虽然保留预览能力，但被
 `sandbox` 扔进不透明源，脚本跑不起来。**预览的准入走的就是这个函数**（`previewKindOf` 先问
 `previewModeOf`，不另写一份类型清单）——两份清单漂掉的表现是"点了预览按钮直接触发下载"，
 而且只在某些类型上偶发，很难当场联想到是清单问题。
+
+### 文本类文件：能看源码，但不会被渲染
+
+`.html` / `.py` / `.log` / `.yml` / `.xml` / `.js` / `.css` / `Makefile` 这些**文本类文件**
+在上传时就被规范化成 `text/plain`（服务端的 `textExts` / `textNames` 两张表，由
+`normalizeUploadMime` 在 `handleUploadInit` 里应用）。所以列表里它们有「预览」按钮，
+点开看到的是**源码本身**——既不是渲染出来的页面，也不是下载。
+
+为什么不干脆把它们的真实类型加进白名单：那些类型各有执行面——`text/html` 内联就是那条
+存储型 XSS；`text/xml` 内联时 `<?xml-stylesheet?>` 指到的 XSLT 在 Chrome 里**会执行**，
+输出 HTML 照样能跑脚本；`text/javascript` 同理。规范成 `text/plain` 之后这些路都断了，
+而用户照样能读内容——"分享日志 / 配置 / 源码"要的本来就是后者。
+
+安全性靠两层：① `text/plain` 不是脚本上下文；② 全局的 `X-Content-Type-Options: nosniff`
+（`securityHeaders` 设的，`/f/` 也走）让浏览器不会拿真实内容去嗅探类型。想拿原件就点
+「下载」——那个链接带 `?dl=1`，强制 `attachment`。
+
+**三个刻意的例外**，都写在 `download.go` 的注释里：
+
+- `.svg` 不在文本表里——它是 `image/svg+xml`（走 sandbox），当图片看比看源码有用
+- `.txt` / `.csv` / `.md` / `.json` 不在文本表里——真实类型本来就在白名单里，没必要改写
+- **`.ts` 不在文本表里**——它更常见的身份是 MPEG 传输流（下载的 HLS 分片、录制的电视节目），
+  当 TypeScript 规范成纯文本会让那些视频点开变成一堆乱码。`.tsx` 没有这层歧义，所以在表里。
+  同类歧义后缀（`.sub` / `.mod` / `.bin` / `.dat` …）一律不进表，单测
+  `TestAmbiguousExtensionsStayOutOfTextExts` 钉着
 
 预览层本身有几处是刻意的：
 
@@ -1007,7 +1037,7 @@ data/
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/api/upload/init` | 创建上传任务，返回 uploadId 与已收到的分片 |
+| `POST` | `/api/upload/init` | 创建上传任务，返回 uploadId 与已收到的分片。`mime` 由客户端声明（没给就按扩展名兜底），但**文本类文件会被规范化成 `text/plain`**（见「文本类文件」一节） |
 | `PUT` | `/api/upload/{id}/{idx}` | 上传第 idx 个分片（body 为分片原始字节） |
 | `GET` | `/api/upload/{id}/status` | 查询已收到的分片，用于续传 |
 | `POST` | `/api/upload/{id}/complete` | 合并分片，生成正式文件。返回的文件对象与 `GET /api/files` 同构（含 `preview`） |
@@ -1180,7 +1210,12 @@ go test ./...
   参数、大小写、首尾空白的写法），而 HTML、JavaScript、压缩包、`application/octet-stream`、
   Word / PowerPoint 的 MIME、空串一律归不进去。另有三条**契约断言**：**有归类 ⇒ 能内联**、
   **没归类 ⇒ 只能下载**、SVG 归成图片但走 sandbox。它们守的是「`previewKindOf` 必须先问
-  `previewModeOf`」这件事——两份清单漂掉不会报错，只会让预览按钮点了直接下载
+  `previewModeOf`」这件事——两份清单漂掉不会报错，只会让预览按钮点了直接下载。
+  另外三条守**上传时的文本类规范化**：`TestNormalizeUploadMime`（表里每个后缀都必须落到
+  `text/plain` 且真的可内联；不在表里的一律原样返回，一个字节都不改）、
+  `TestNormalizeUploadMimeNeverYieldsScriptable`（规范化绝不能产出可执行脚本的类型）、
+  `TestAmbiguousExtensionsStayOutOfTextExts`（`.ts` / `.sub` / `.mod` / `.bin` / `.dat` 这类
+  **同一后缀既有常见文本形态、又有常见二进制形态**的一律不许进表——`.ts` 这条是实测踩出来的）
 - `internal/server/events_test.go`：广播中心——通知能到达订阅者、注销后不再投递、
   通知永不阻塞调用方（卡住的客户端不能拖住上传）、同一主题多次变更合并成一次、
   **不同主题绝不被合并**（这是引入主题机制的原因本身，见上方「关于文本发送」）、
@@ -1259,7 +1294,7 @@ go test ./...
   **`dockerhub` 源没给 `QS_UPDATE_REPO` 时必须主动关掉、不能回落到注入的 GitHub 仓库名**
   ——回落的后果是拿 GitHub 仓库名去 Docker Hub 查，必然 404 且看不出原因）
 
-端到端冒烟测试 `e2e.sh` 覆盖 320 项断言：分片上传、断点续传、分片截断拦截、分片越界拦截
+端到端冒烟测试 `e2e.sh` 覆盖 324 项断言：分片上传、断点续传、分片截断拦截、分片越界拦截
 （声明 0 字节的任务不得接收任何分片）、路径穿越防护、Range 下载内容比对（sha256）、
 预览/下载两种响应头、删除、空文件、口令鉴权、外观设置与背景图（含类型白名单、大小上限、
 主题注入、静态资源缓存）、模糊度与三块不透明度的持久化与越界拦截、
@@ -1297,7 +1332,8 @@ go test ./...
 短信里带关键词与数字也算验证码、只出现 `code` 没有连续数字的不算、
 关掉规则后验证码按全局档走、两个列表都带上 `ttlSeconds` / `expiresAt` / `isCode`、
 **设了保留时长不会在请求路径上立刻删东西**、以及两个新接口都受口令保护）、
-以及预览安全（HTML/JS 只下载、SVG 带 sandbox CSP、应用页面 CSP、下载路径不被套上页面 CSP）、
+以及预览安全（`text/html` 与 JS 的类型都只下载、文本类文件被规范成 `text/plain` 只读不执行、
+SVG 带 sandbox CSP、应用页面 CSP、下载路径不被套上页面 CSP）、
 预览归类字段（列表里每条都带 `preview`，且取值只落在五类或空串里——将来往白名单加了类型
 却忘了归类时不会报错，只有这条能拦住）、
 反向代理下的设备身份（独立实例，配 `QS_TRUSTED_PROXIES` 跑一遍：**没配名单时伪造的
@@ -1341,6 +1377,21 @@ QS_BASE=http://127.0.0.1:18080 bash e2e.sh
 > `netstat -ano` + `taskkill`，Linux 走 `ss -lptn` / `lsof` + `kill`）。
 > 别把它改回只认 Windows：在 Linux 上它会静默空转，紧跟其后的收尾等待
 > 会一直等一个不存在的进程，CI 表现为**卡到 job 超时**而不是报错。
+>
+> 脚本跑之前会**挑一个二进制**，并且挑完就打印出来。这里有两个坑，都踩过：
+>
+> **一、Git Bash 会把 `./dist/quickshare` 解析成 `quickshare.exe`。** MSYS2 的
+> `test -x` / `ls` 都会按 `PATHEXT` 补后缀，而 `dist/` 里同时躺着两个 Windows
+> 产物是常态（`make build` 出 `quickshare.exe`，`make windows` 出
+> `quickshare-windows-amd64.exe`）。只要无后缀那个排在候选表前面，就会**静默
+> 选中另一个**——真出过事：只重编了 `-windows-amd64.exe`，e2e 却选了没更新的
+> `quickshare.exe`，跑出 320 项全绿，验的其实是旧二进制。所以候选表**按平台分开列**，
+> Windows 上不列无后缀候选，Linux / macOS 上不列 `.exe` 候选。
+>
+> **二、产物可能比源码旧。** 所以脚本会拿二进制的 mtime 去比 `*.go` / `*.html` /
+> `*.css` / `*.js` / `go.mod`，**只要有一个源文件更新就直接拒绝跑**（并列出是哪几个），
+> 而不是递一份假绿。确实想跑旧产物就 `QS_E2E_ALLOW_STALE=1 bash e2e.sh`。
+> 想指定别的产物用 `QS_BIN=路径`。
 
 ---
 
@@ -1488,7 +1539,8 @@ SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`
   而不是指望每次记得手动改版本。
 - **无头 Chrome + CDP 做行为验证**：命令行截图只能看首屏，点不了按钮、也判断不了"脚本到底跑没跑"。
   涉及交互和配色时，用 CDP 连上无头 Chrome，固定视口后执行 JS 读 `getComputedStyle` / `document.title`。
-  预览安全的修复就是靠它在真实浏览器里确认：上传的 HTML 没被渲染成站内文档、SVG 里的脚本没有执行。
+  预览安全的修复就是靠它在真实浏览器里确认：上传的 HTML **被当纯文本对待**（`document.contentType`
+  是 `text/plain`，脚本读不到 localStorage）、SVG 里的脚本没有执行。
   > **这些脚本不在仓库里。** 它们放在 `.tmp/shots/`，而 `.tmp/` 是 gitignore 的（见上面的目录结构），
   > 所以**文中出现的 `.tmp/shots/…` 路径都只能当开发过程的记录看**，clone 下来是找不到这些文件的。
   > 唯一随仓库发布的是端到端冒烟 `e2e.sh`，它只依赖 curl 和 Python，`bash e2e.sh` 就能跑。
@@ -1551,7 +1603,8 @@ SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`
   除上述几个，另有三个专项脚本各管一块：`verify-link-qr.mjs`（24 项：悬停出二维码、
   点复制、`navigator.clipboard` 缺失时走 `execCommand` 的降级路径、深色下二维码仍保持白底）、
   `verify-sse-ui.mjs`（8 项：远端改动自动刷新并弹提示、**本机改动不弹**）、
-  `xss.mjs`（6 项：上传的 HTML 只下载不渲染、带脚本的 SVG 仍能内联预览但脚本被 CSP 掐断）。
+  `xss.mjs`（9 项：上传的 HTML 被当纯文本对待——`contentType=text/plain`、源码可见、脚本没跑，
+  而带 `?dl=1` 仍是下载；带脚本的 SVG 仍能内联预览但脚本被 CSP 掐断）。
   文件列表的搜索与排序另有一个 `verify-file-list.mjs`（63 项，配 `.tmp/run-file-list.sh`）：
   六种排序各验一遍顺序，加上搜索、搜索与排序叠加、`localStorage` 往返与**非法值回退**、
   自动刷新后筛选条件不被冲掉、窄视口换行、工具条两个控件的**高度**也一致（光"中心对齐"
@@ -1599,11 +1652,13 @@ SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`
   > 会以为读错了——现在写成"0 = 跟随全局设置（1 小时）"，把全局值直接摆出来。
   > 剩下 2 条是**断言写得太死**：拿 `JSON.stringify` 比 Go 序列化出来的 map，键序是字母序
   > 不是书写序，改成比 `10|minute` 这种拼串就稳了。
-  预览功能另有一个 `verify-preview.mjs`（60 项）。它自带素材、不依赖外部编排脚本：手写 2×2
+  预览功能另有一个 `verify-preview.mjs`（66 项）。它自带素材、不依赖外部编排脚本：手写 2×2
   BMP（**刻意不用 PNG**——PNG 要 zlib + CRC32 才算得出合法字节，手写一串 base64 就成了对那串
   魔数的信仰）、能真解码的 WAV（"播放中切走要静音"那条断言的**前置**：素材本身放不出来，
   那条断言就恒真了）、一个解不了码的假 mp4（验兜底文案）、一个内含 `<script>` 的 txt、
-  一个超过 512 KiB 的大文本、一个 zip、一个 html。十一节分别盯：服务端 `preview` 字段、
+  一个超过 512 KiB 的大文本、一个 zip（**必须没有预览**）、一个 html（**文本类，会被规范化成
+  `text/plain` 从而有预览**——这条曾经是反例，2026-09-19 起改成正例，顺带验了"规范化会覆盖
+  客户端声明的 `text/html`"）。十一节分别盯：服务端 `preview` 字段、
   按钮有无、图片真的解码出来、环绕翻页、**播放中切走声音要停**、视频兜底、键盘翻页、
   PDF 走 iframe、文本原样不解析、只剩一条时按钮置灰、焦点在输入框时不接管按键、三种关闭
   方式、以及**文件被删后预览自动关**。
@@ -1655,8 +1710,8 @@ SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`
   并把实例绑到所有接口以便设备身份那套能跑；起停都在同一个脚本里——Bash 调用返回时
   该次调用中用 `&` 起的子进程会被一起收掉；**按退出码判成败**，有脚本红了就以非 0 退出；
   **不带脚本名直接跑等于一条都不跑**——日志里只有两行、退出码却是 0，所以现在没给参数会
-  当场报错退出）。它当前串起 14 个脚本、合计 419 项，配上 `verify-file-list`（63 项）、
-  `verify-link-qr`（24 项）、`xss`（6 项），一轮完整的前端回归是 **512 项**、约三分半）、
+  当场报错退出）。它当前串起 14 个脚本、合计 421 项，配上 `verify-file-list`（63 项）、
+  `verify-link-qr`（24 项）、`xss`（9 项），一轮完整的前端回归是 **517 项**、约三分半）、
   `run-paste.sh`（见上，跑之前先 `go build` 一个带最新前端的二进制）、
   `run-link-qr.sh`（`verify-link-qr.mjs` 把
   文件行数写死成 3，得先走上传接口把样本文件造出来；同样每轮一个全新目录、**并把

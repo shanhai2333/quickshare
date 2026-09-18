@@ -47,15 +47,45 @@ PORT_UPDATE=18084
 DATA=".tmp/qs-test"
 LOG=".tmp/e2e-server.log"
 
-# 自动找可执行的 quickshare。Windows 是 .exe，Linux/macOS 没有扩展名。
-# 想指定别的产物就设 QS_BIN。
+# 自动找可执行的 quickshare。想指定别的产物就设 QS_BIN。
+#
+# ⚠️ 候选表**故意按平台分开列**，不是图整齐：
+#    Git Bash（MSYS2）的 `test -x` 和 `ls` 都会按 PATHEXT 补后缀，
+#    于是 `./dist/quickshare` 会**解析成 quickshare.exe**。
+#    dist/ 里同时躺着两个 Windows 产物是常态（`make build` 出 quickshare.exe，
+#    `make windows` 出 quickshare-windows-amd64.exe），只要无后缀那个排在前面，
+#    就会**静默选中另一个**。真踩过：只重编了 -windows-amd64.exe，
+#    e2e 却选中了没更新的 quickshare.exe，跑出 320 项全绿——验的是旧二进制。
+#    所以 Windows 上不列无后缀候选，Linux/macOS 上不列 .exe 候选。
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*) CANDIDATES="./dist/quickshare.exe ./dist/quickshare-windows-amd64.exe" ;;
+  Darwin)               CANDIDATES="./dist/quickshare ./dist/quickshare-darwin-arm64 ./dist/quickshare-darwin-amd64" ;;
+  *)                    CANDIDATES="./dist/quickshare ./dist/quickshare-linux-amd64 ./dist/quickshare-linux-arm64 ./dist/quickshare-linux-armv7" ;;
+esac
+
 BIN=""
-for c in "${QS_BIN:-}" ./dist/quickshare ./dist/quickshare-windows-amd64.exe \
-         ./dist/quickshare-linux-amd64 ./dist/quickshare-linux-arm64 ./dist/quickshare-linux-armv7; do
-  if [ -n "$c" ] && [ -x "$c" ]; then BIN="$c"; break; fi
+for c in ${QS_BIN:-} $CANDIDATES; do
+  if [ -n "$c" ] && [ -f "$c" ]; then BIN="$c"; break; fi
 done
 if [ -z "$BIN" ]; then
   echo "找不到可执行文件，请先编译（见 README）"; exit 1
+fi
+
+# 选了哪个产物要**明说**——上面那个坑的另一半就是"跑完了也不知道验的是谁"。
+echo "使用二进制：$BIN  （改动时间 $(date -r "$BIN" '+%m-%d %H:%M' 2>/dev/null || echo '?')）"
+
+# 陈旧产物守卫：二进制比源码旧，就说明它没包含当前改动，跑出来的绿是假的。
+# 宁可拒绝跑，也不要递一份假绿。真要跑旧产物就设 QS_E2E_ALLOW_STALE=1。
+if [ "${QS_E2E_ALLOW_STALE:-0}" != "1" ]; then
+  NEWER="$(find . \( -path ./.git -o -path ./.tmp -o -path ./dist -o -path ./.workbuddy-ai \) -prune -o \
+                 \( -name '*.go' -o -name '*.html' -o -name '*.css' -o -name '*.js' \
+                    -o -name 'go.mod' -o -name 'go.sum' \) -newer "$BIN" -print 2>/dev/null | head -5)"
+  if [ -n "$NEWER" ]; then
+    echo "⚠️  $BIN 比下面这些源文件旧，它没包含当前改动："
+    printf '      %s\n' $NEWER
+    echo "    请先重新编译（make build / make windows），或设 QS_E2E_ALLOW_STALE=1 强制跑旧产物。"
+    exit 1
+  fi
 fi
 
 PASS=0; FAIL=0
@@ -559,15 +589,29 @@ chk "再查一次顺序不变" \
 
 echo
 echo "=== 14. 预览安全：上传内容不得在本站源里执行 ==="
-# 攻击面：上传一个 .html，受害者点开列表里的链接。若以 inline 在本站源渲染，
+# 攻击面：上传一个 .html，受害者点开列表里的链接。若以 text/html 内联在本站源渲染，
 # 里面的脚本就能读到 localStorage 里的管理口令，进而以管理员身份调所有接口
-# （这是实测复现过的存储型 XSS）。处置：下载路径改用白名单，只有明确安全的
-# 类型才 inline，其余一律 attachment。
+# （这是实测复现过的存储型 XSS）。防线有两层，这里两层都要验：
+#   ① 类型层：下载准入是白名单，text/html 永远不在里面（所以"文件名不带文本后缀、
+#      但客户端自报 text/html"的文件必须只下载）；
+#   ② 文件层：`.html` 这类文本类文件在**上传时**被规范化成 text/plain，于是它内联，
+#      但内联的是纯文本、不是 HTML——真正的安全性质是"浏览器不把它当 HTML"，
+#      而不是"它必须下载"（2026-09-19 改，之前只验了下载）。
 XSS_HTML='<!doctype html><title>probe</title><script>document.title=localStorage.getItem("qs_token")</script>'
 F_HTML=$(put_small 'probe.html' "$XSS_HTML" 'text/html')
 HID=$(echo "$F_HTML" | jget id)
-HDISP=$(curl -s -o /dev/null -D - "$B/f/$HID/probe.html" | tr -d '\r' | grep -i '^content-disposition')
-case "$HDISP" in *attachment*) ok "上传的 HTML 只下载、不内联";; *) bad "HTML 必须 attachment，实际: [$HDISP]";; esac
+HHEAD=$(curl -s -o /dev/null -D - "$B/f/$HID/probe.html" | tr -d '\r')
+HCT=$(echo "$HHEAD" | grep -i '^content-type:')
+HDISP=$(echo "$HHEAD" | grep -i '^content-disposition')
+case "$HCT" in *text/plain*) ok "上传的 HTML 被规范化成 text/plain（只读不渲染）";; *) bad "HTML 应被规范成 text/plain，实际: [$HCT]";; esac
+case "$HDISP" in *inline*) ok "文本类文件内联预览（能看源码）";; *) bad "text/plain 应内联，实际: [$HDISP]";; esac
+
+# 反证：**文件名不带文本后缀**时，客户端自报的 text/html 依然只下载——说明类型层那道
+# 白名单没被"文本类规范化"削弱（规范化按文件名走，覆盖的是客户端的声明，不是放宽准入）
+F_RAW=$(put_small 'probe_raw' "$XSS_HTML" 'text/html')
+RID=$(echo "$F_RAW" | jget id)
+RDISP=$(curl -s -o /dev/null -D - "$B/f/$RID/probe_raw" | tr -d '\r' | grep -i '^content-disposition')
+case "$RDISP" in *attachment*) ok "自报 text/html 且文件名无文本后缀 → 仍只下载";; *) bad "应 attachment，实际: [$RDISP]";; esac
 
 XSS_SVG='<svg xmlns="http://www.w3.org/2000/svg"><script>document.title="ran"</script></svg>'
 F_SVG=$(put_small 'probe.svg' "$XSS_SVG" 'image/svg+xml')
@@ -586,11 +630,24 @@ TID=$(echo "$F_TXT" | jget id)
 TDISP=$(curl -s -o /dev/null -D - "$B/f/$TID/note.txt" | tr -d '\r' | grep -i '^content-disposition')
 case "$TDISP" in *inline*) ok "text/plain 仍内联预览";; *) bad "text/plain 应内联，实际: [$TDISP]";; esac
 
-# 白名单外的脚本类型一律下载
+# 白名单外的脚本类型：`.js` 会被规范化成 text/plain（能看源码），但"以 text/javascript
+# 内联"这件事仍然禁止——反证同样放在"文件名不带文本后缀"的那条上
 F_JS=$(put_small 'evil.js' 'document.title=1' 'text/javascript')
 JID=$(echo "$F_JS" | jget id)
-JDISP=$(curl -s -o /dev/null -D - "$B/f/$JID/evil.js" | tr -d '\r' | grep -i '^content-disposition')
-case "$JDISP" in *attachment*) ok "JavaScript 文件只下载、不内联";; *) bad "JS 必须 attachment，实际: [$JDISP]";; esac
+JCT=$(curl -s -o /dev/null -D - "$B/f/$JID/evil.js" | tr -d '\r' | grep -i '^content-type:')
+case "$JCT" in *text/plain*) ok ".js 也被规范化成 text/plain";; *) bad ".js 应被规范成 text/plain，实际: [$JCT]";; esac
+
+F_JSRAW=$(put_small 'evil_raw' 'document.title=1' 'text/javascript')
+JID2=$(echo "$F_JSRAW" | jget id)
+JDISP=$(curl -s -o /dev/null -D - "$B/f/$JID2/evil_raw" | tr -d '\r' | grep -i '^content-disposition')
+case "$JDISP" in *attachment*) ok "text/javascript 这个类型仍然只下载";; *) bad "应 attachment，实际: [$JDISP]";; esac
+
+# 歧义后缀的反证：`.ts` 更常见的身份是 MPEG 传输流，**不许**进文本表
+# （2026-09-19 探针当场逮到过这个回归：进了表的话视频会被当纯文本，点开全是乱码）
+F_TS=$(put_small 'clip.ts' 'MPEG-TS bytes' 'video/vnd.dlna.mpeg-tts')
+TSID=$(echo "$F_TS" | jget id)
+TSCT=$(curl -s -o /dev/null -D - "$B/f/$TSID/clip.ts" | tr -d '\r' | grep -i '^content-type:')
+case "$TSCT" in *text/plain*) bad ".ts 不该被当纯文本（它是 MPEG 传输流），实际: [$TSCT]";; *) ok ".ts 没被当文本处理（仍是它自己的类型）";; esac
 
 chk "下载响应带 nosniff（禁止类型嗅探）" \
   "$(curl -s -o /dev/null -D - "$B/f/$HID/probe.html" | grep -ci '^x-content-type-options: nosniff')" "1"

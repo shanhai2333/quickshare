@@ -66,6 +66,9 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	if mimeType == "" {
 		mimeType = mimeByExt(name)
 	}
+	// 文本类文件一律按 text/plain 存：既能看源码，又不会被当 HTML/XML 渲染。
+	// 表与理由都在 download.go 的 textExts 那段注释里。
+	mimeType = normalizeUploadMime(name, mimeType)
 
 	f := &store.File{
 		ID:          id,
