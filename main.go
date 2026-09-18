@@ -68,6 +68,9 @@ func main() {
 		UpdateSource:  updateSource,
 		UpdateRepo:    updateRepo,
 		DataDirLocked: explicitData,
+		// 反向代理下取真实客户端地址用的受信名单。**留空 = 一个都不信**（默认），
+		// 也就是完全不看 X-Forwarded-For。详见 internal/server/proxy.go。
+		TrustedProxies: os.Getenv("QS_TRUSTED_PROXIES"),
 		PersistDataDir: func(dir string) error {
 			launch.DataDir = dir
 			return saveLaunchConfig(launch)

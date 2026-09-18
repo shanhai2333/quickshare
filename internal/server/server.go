@@ -56,6 +56,14 @@ type Config struct {
 	// PersistDataDir 把新的数据目录写进启动配置，供下次启动读取。
 	// 为 nil 表示没有可写配置（比如只读部署），此时不允许在界面里改目录。
 	PersistDataDir func(dir string) error
+
+	// TrustedProxies 是受信代理名单（`QS_TRUSTED_PROXIES`），逗号分隔的 IP 或网段。
+	//
+	// **留空表示一个代理都不信**，也就是完全不去看 X-Forwarded-For —— 这是默认值，
+	// 也是唯一安全的值：那个头是请求方随便写的，无条件采信等于把设备身份交回给请求方。
+	// 只有把反向代理自己的地址配进来，服务才会去读它，且只认"从右往左第一个
+	// 不受信的地址"。详见 proxy.go。
+	TrustedProxies string
 }
 
 // backend 是"当前正在用的数据目录 + 数据库句柄"。
@@ -100,6 +108,10 @@ type Server struct {
 
 	// 版本更新检查（问 GitHub 有没有新 release），自带缓存。
 	update *updateChecker
+
+	// 解析好的受信代理名单（`QS_TRUSTED_PROXIES`）。**为空表示一个都不信**，
+	// 也就是不去看 X-Forwarded-For，行为跟以前完全一样。
+	proxies trustedProxies
 }
 
 // New 构造 Server。web 是内嵌的前端静态资源根目录。
@@ -114,11 +126,18 @@ func New(cfg Config, st *store.Store, web fs.FS) *Server {
 		cfg.Version = version.Version
 	}
 	s := &Server{
-		cfg:    cfg,
-		web:    web,
-		assets: assetVersion(web),
-		events: newEventHub(),
-		update: newUpdateChecker(cfg.UpdateSource, cfg.UpdateRepo),
+		cfg:     cfg,
+		web:     web,
+		assets:  assetVersion(web),
+		events:  newEventHub(),
+		update:  newUpdateChecker(cfg.UpdateSource, cfg.UpdateRepo),
+		proxies: parseTrustedProxies(cfg.TrustedProxies),
+	}
+	if len(s.proxies) > 0 {
+		// 配了就打一行，让"为什么设备列表里现在是真实 IP"这件事有据可查。
+		// 这是个安全相关的开关，静默生效不合适。
+		log.Printf("  受信代理   %s（只有来自这些地址的 X-Forwarded-For 才被采信）",
+			cfg.TrustedProxies)
 	}
 	s.cur.Store(&backend{st: st, dataDir: cfg.DataDir})
 	return s
@@ -462,7 +481,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// 回显请求方自己的 IP。设备身份就是它，让页面随时能显示"你是哪台"，
 		// 不必等到发过文本、在设备表里有了记录才知道。回显自己的地址，
 		// 不涉及任何别人的信息，所以这个公开接口可以给。
-		"clientIp": clientIP(r),
+		"clientIp": s.clientIP(r),
 	})
 }
 

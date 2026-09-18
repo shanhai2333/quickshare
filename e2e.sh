@@ -42,6 +42,7 @@ TMP="${QS_E2E_TMP:-$REPO_DIR/.tmp/e2e}"
 PORT=18080
 PORT_AUTH=18081
 PORT_SWITCH=18082
+PORT_PROXY=18083
 DATA=".tmp/qs-test"
 LOG=".tmp/e2e-server.log"
 
@@ -189,11 +190,14 @@ else
 fi
 A="http://127.0.0.1:$PORT_AUTH"
 SW="http://127.0.0.1:$PORT_SWITCH"
+P="http://127.0.0.1:$PORT_PROXY"
 
 cleanup() {
-  # 只收自己起的实例。$PORT_AUTH / $PORT_SWITCH 上的实例无论哪种模式都是本脚本起的。
+  # 只收自己起的实例。$PORT_AUTH / $PORT_SWITCH / $PORT_PROXY 上的实例无论哪种模式
+  # 都是本脚本起的。
   kill_port $PORT_AUTH
   kill_port $PORT_SWITCH
+  kill_port $PORT_PROXY
   if [ "$OWN" = "1" ]; then kill_port $PORT; fi
   # 顺手把测试数据目录清掉。留着既没用，又会一轮轮攒文件，最后把下次开头的
   # 清理卡住（见 wipe_dir 的注释）。$TMP 里的日志刻意保留，排查时要看。
@@ -1408,6 +1412,64 @@ chk "设了保留时长后文本没被立刻删掉" "$(curl -s "$B/api/texts" | 
 curl -s -X PUT -H 'Content-Type: application/json' \
   -d '{"textTTL":{"value":0,"unit":"day"},"fileTTL":{"value":0,"unit":"day"},"codeTTL":{"value":0,"unit":"minute"}}' \
   "$B/api/settings" > /dev/null
+
+# ---------------------------------------------------------------- 24
+echo
+echo "=== 24. 反向代理下的设备身份（QS_TRUSTED_PROXIES） ==="
+
+# 设备身份取自连接的源地址。前面挂了 Nginx / Caddy / Docker Desktop 的 userland-proxy
+# 之后，源地址变成代理自己，所有设备会被合并成一台——所以有个受信代理名单。
+#
+# 这一节真正盯的是**默认行为不能被改坏**：没配名单时 X-Forwarded-For 一个字都不能读。
+# 那个头是请求方随便写的，一旦采信，任何客户端 curl 一下就能报上别人的地址去冒充
+# 别的设备、甚至借"改备注"把别人的设备名改掉。
+
+# ---- 24.1 主实例（没配名单）：转发头必须被彻底无视
+curl -s -X POST -H 'Content-Type: application/json' \
+  -H 'X-Forwarded-For: 198.51.100.7' -H 'X-Real-IP: 198.51.100.7' \
+  -d '{"content":"伪造转发头"}' "$B/api/texts" > /dev/null
+DEVS=$(curl -s "$B/api/devices")
+chk "没配名单时，伪造的 X-Forwarded-For 不会变成一台设备" \
+  "$(printf '%s' "$DEVS" | "$PY" -c 'import sys,json;print(any(d["id"]=="198.51.100.7" for d in json.load(sys.stdin)))')" "False"
+chk "这条文本仍归到本机那台" \
+  "$(printf '%s' "$DEVS" | "$PY" -c 'import sys,json;print(any(d["id"]=="localhost" for d in json.load(sys.stdin)))')" "True"
+chk "没配名单时 /api/config 的 clientIp 也不受转发头影响" \
+  "$(curl -s -H 'X-Forwarded-For: 198.51.100.7' "$B/api/config" | jget clientIp)" "localhost"
+
+# ---- 24.2 配了名单的实例：只有直连对端在名单里才读
+kill_port $PORT_PROXY # 上一轮若异常退出可能还占着
+QS_TRUSTED_PROXIES=127.0.0.1 QS_UPDATE_CHECK=0 \
+  "$BIN" -addr "127.0.0.1:$PORT_PROXY" -data "$TMP/proxydata" -tray=false \
+  > "$TMP/proxy.log" 2>&1 &
+for _ in $(seq 1 40); do
+  [ "$(code "$P/api/config")" = "200" ] && break
+  sleep 0.25
+done
+
+chk "配了名单后，X-Forwarded-For 里的地址成为设备身份" \
+  "$(curl -s -H 'X-Forwarded-For: 198.51.100.7' "$P/api/config" | jget clientIp)" "198.51.100.7"
+
+# **核心一条**：取的是从右往左第一个不受信的地址。代理把真实地址**追加**在末尾，
+# 客户端自己塞的留在左边；从左边取就等于让请求方自己填身份。
+chk "伪造的左侧条目被忽略，取右边真实的那个" \
+  "$(curl -s -H 'X-Forwarded-For: 127.0.0.1, 203.0.113.9' "$P/api/config" | jget clientIp)" "203.0.113.9"
+
+chk "链上多级受信代理时继续往左找" \
+  "$(curl -s -H 'X-Forwarded-For: 203.0.113.9, 127.0.0.1' "$P/api/config" | jget clientIp)" "203.0.113.9"
+
+chk "只有 X-Real-IP 时也认（Nginx 常见写法）" \
+  "$(curl -s -H 'X-Real-IP: 198.51.100.9' "$P/api/config" | jget clientIp)" "198.51.100.9"
+
+chk "两个头都没有时退回源地址（本机）" \
+  "$(curl -s "$P/api/config" | jget clientIp)" "localhost"
+
+# 身份要真的流进设备表，不只是 /api/config 回显对了
+curl -s -X POST -H 'Content-Type: application/json' -H 'X-Forwarded-For: 198.51.100.7' \
+  -d '{"content":"经代理发的"}' "$P/api/texts" > /dev/null
+chk "经代理发的文本按转发地址登记设备" \
+  "$(curl -s -H 'X-Forwarded-For: 198.51.100.7' "$P/api/devices" | "$PY" -c 'import sys,json;print(any(d["id"]=="198.51.100.7" and d["isMe"] for d in json.load(sys.stdin)))')" "True"
+
+kill_port $PORT_PROXY
 
 echo
 echo "=================================================="

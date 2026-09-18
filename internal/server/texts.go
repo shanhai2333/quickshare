@@ -133,7 +133,7 @@ func (s *Server) handleCreateText(w http.ResponseWriter, r *http.Request) {
 
 	// 让前端传 deviceId 的话，任何人 curl 一下就能报上别人的 ID，
 	// 冒充别的设备发文本、甚至借"改备注"把别人的设备名改掉。
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 
 	b := s.be()
 	if ip != "" {
@@ -329,7 +329,7 @@ func (s *Server) handleListDevices(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	me := clientIP(r)
+	me := s.clientIP(r)
 	out := make([]deviceDTO, 0, len(devices))
 	for _, d := range devices {
 		out = append(out, deviceDTO{
@@ -561,37 +561,9 @@ func normalizeHost(host string) string {
 	return host
 }
 
-// clientIP 取发起请求的客户端 IP，它就是设备身份。
-//
-// **为什么不用浏览器生成的随机串**：那种串只能存在 localStorage 里，而
-// localStorage 严格按 origin 隔离。同一个服务，用 127.0.0.1、localhost、
-// 内网 IP 打开就是三个不同的 origin，各存各的随机串——同一台机器会被记成
-// 三台设备。用户"新开一个窗口"（顺手换了个地址）就会看到设备列表里多一条。
-//
-// **代价**：同一个 NAT / 手机热点后面共享出口 IP 的多台设备会被合并成一台。
-// 内网直连场景下每台设备有自己的 IP，这个取舍是划算的；真要再细分，
-// 用户还能自己改备注。
-//
-// 刻意**不看 X-Forwarded-For**：内网直连时它本来就是空的，而一旦信任它，
-// 任何客户端都能随手编一个来冒充别的设备——等于把身份又交回给请求方。
-// 将来真要放到反向代理后面，必须改成"只信明确配置过的代理地址"。
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		// 正常总是 "IP:端口"。真解析不出来就原样用；空串会让调用方跳过登记。
-		host = r.RemoteAddr
-	}
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return ""
-	}
-	// 本机自己的地址（回环、以及本机所有网卡地址）统一归到一个 ID。
-	// 少了这一步，"用 127.0.0.1 打开"和"用内网 IP 打开"仍是两台设备。
-	if isLocalAddr(host) {
-		return localDeviceID
-	}
-	return normalizeHost(host)
-}
+// clientIP / deviceIDFromAddr / deviceIDFor 都在 proxy.go 里。
+// 设备身份的那套推理（为什么用 IP 而不是 localStorage、为什么本机地址要归一、
+// 反向代理下怎么取）也在那儿。
 
 // ---------------------------------------------------------------- 工具
 

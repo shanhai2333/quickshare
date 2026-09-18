@@ -129,7 +129,8 @@ func TestDeviceNameFromUA(t *testing.T) {
 
 // ---------------------------------------------------------------- 工具函数
 
-// clientIP 是设备身份的唯一来源，形状判错会让"同一台机器"分裂或串台。
+// deviceIDFromAddr 是设备身份的唯一来源（不经过代理头那条路），
+// 形状判错会让"同一台机器"分裂或串台。
 func TestClientIP(t *testing.T) {
 	// 非本机地址：原样返回（去掉端口、规范化写法）
 	remote := []struct {
@@ -147,8 +148,8 @@ func TestClientIP(t *testing.T) {
 	}
 	for _, c := range remote {
 		r := &http.Request{RemoteAddr: c.in}
-		if got := clientIP(r); got != c.want {
-			t.Errorf("clientIP(%q) = %q，期望 %q", c.in, got, c.want)
+		if got := deviceIDFromAddr(r.RemoteAddr); got != c.want {
+			t.Errorf("deviceIDFromAddr(%q) = %q，期望 %q", c.in, got, c.want)
 		}
 	}
 
@@ -158,8 +159,8 @@ func TestClientIP(t *testing.T) {
 	// 恰恰靠它来模拟"另一台设备"，判错会把测试自己搞乱。
 	for _, in := range []string{"127.0.0.1:1234", "127.0.0.5:1234", "[::1]:1234"} {
 		r := &http.Request{RemoteAddr: in}
-		if got := clientIP(r); got != localDeviceID {
-			t.Errorf("clientIP(%q) = %q，期望归一为 %q", in, got, localDeviceID)
+		if got := deviceIDFromAddr(r.RemoteAddr); got != localDeviceID {
+			t.Errorf("deviceIDFromAddr(%q) = %q，期望归一为 %q", in, got, localDeviceID)
 		}
 	}
 }
@@ -182,7 +183,7 @@ func TestClientIPLocalInterfaceNormalized(t *testing.T) {
 		if strings.Contains(ip, ":") {
 			remote = "[" + ip + "]:1234" // IPv6 在 RemoteAddr 里要带方括号
 		}
-		if got := clientIP(&http.Request{RemoteAddr: remote}); got != localDeviceID {
+		if got := deviceIDFromAddr(remote); got != localDeviceID {
 			t.Errorf("本机地址 %s 应当归一为 %q，实际 %q", ip, localDeviceID, got)
 		}
 		checked++

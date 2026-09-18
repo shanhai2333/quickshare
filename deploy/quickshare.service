@@ -47,6 +47,11 @@ RestartSec=3
 # 可选：把 QS_* 环境变量写在里面（QS_ADMIN_TOKEN / QS_CHUNK_SIZE / QS_UPDATE_CHECK…），
 # 一行一个，`KEY=value`。前面的 `-` 表示文件不存在也不报错。
 #EnvironmentFile=-/etc/quickshare.env
+#
+# 前面挂了 Nginx / Caddy 的话，把代理的地址写进 QS_TRUSTED_PROXIES（逗号分隔的 IP 或
+# 网段），否则设备身份会变成代理自己、所有设备被合并成一台。**不写就是"一个代理都不信"**，
+# 服务不会去读 X-Forwarded-For——那是唯一安全的值。
+#Environment=QS_TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12
 
 # 收紧权限：整个文件系统只读，只有数据目录可写。
 # 服务本身不需要别的写权限——启动配置（`~/.config/quickshare/config.json`，只存
