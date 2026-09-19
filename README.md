@@ -9,7 +9,30 @@
 
 > **代码由 AI 生成**，仅供学习与自用参考。若你认为其中某部分内容侵犯了你的权利，
 > 请提 [Issue](../../issues) 联系，我会尽快删除相关内容。详见文末
-> [关于代码来源](#关于代码来源)。
+> [代码来源](#代码来源)。
+
+---
+
+## 目录
+
+**装与用**
+
+- [功能](#功能) —— 这个服务能干什么
+- [快速开始](#快速开始) —— Docker / 直接跑二进制 / 开机自启
+- [使用教程](#使用教程) —— 传文件、发文本、找东西、改设置、删东西
+- [功能详解](#功能详解) —— 外观与主题、切页观感、存储位置、预览与下载、二维码、自动刷新、文本发送、保留时长与自动清理、设置面板、托盘
+- [配置](#配置) —— 环境变量与启动参数
+- [HTTP 接口](#http-接口) —— 公开的与需要口令的
+- [数据目录](#数据目录) —— 数据存在哪、长什么样
+- [常见问题](#常见问题)
+
+**开发与维护**
+
+- [源码结构](#源码结构) —— 每个文件管什么
+- [测试](#测试) —— 单测、端到端冒烟、前端验证脚本
+- [自动发布与版本](#自动发布与版本) —— GitHub Release 与 Docker Hub
+- [技术选型说明](#技术选型说明) —— 为什么是 Go、为什么不用框架
+- [许可证](#许可证)
 
 ---
 
@@ -20,7 +43,7 @@
 - **列表**：文件名、大小、上传时间；点文件名直接在浏览器里打开（图片 / 视频 / PDF / 文本，见下方白名单）
 - **预览**：图片、音频、视频、PDF、文本不用离开列表就能看 / 听 / 播——每行一枚预览按钮，
   点开在当前页面上盖一层预览层，可在**当前列表里**用「上一个 / 下一个」逐个翻（键盘 `←` `→`
-  也行），`Esc` 或点空白处关闭。Word / PowerPoint 不做，原因见「关于预览与下载」
+  也行），`Esc` 或点空白处关闭。Word / PowerPoint 不做，原因见「预览与下载」
 - **列表搜索与排序**：列表上方一个搜索框 + 排序下拉。搜索按文件名匹配，不区分大小写；
   排序有六种——上传时间（新→旧 / 旧→新）、文件名（A→Z / Z→A）、大小（大→小 / 小→大）。
   **全在前端做**，敲字不额外发请求；选过的排序会记住（存本地，只影响这台设备）
@@ -53,7 +76,257 @@
 次数。分享出去的地址和你在列表里点是同一个入口（真想让旧文件到点消失，就用自动清理那一档，
 它是对整站生效的）。
 
-### 关于外观设置
+---
+
+## 快速开始
+
+### 方式一：Docker（推荐）
+
+**用发布好的镜像**（多架构：amd64 / arm64 / armv7，会自动选对）：
+
+```bash
+mkdir -p ./data
+sudo chown -R 1000:1000 ./data
+
+docker run -d --name quickshare \
+  -p 8080:8080 \
+  -v ./data:/data \
+  --user 1000:1000 \
+  --restart unless-stopped \
+  <你的用户名>/quickshare:latest
+```
+
+**或者用仓库里的 compose 现场构建**：
+
+```bash
+mkdir -p ./data
+
+# 如果 NAS 上目录属主不是 1000:1000，先改权限
+# （群晖上 uid 常见是 1026，威联通常见是 1000）
+sudo chown -R 1000:1000 ./data
+
+docker compose up -d --build
+```
+
+> 两种方式的区别只在**镜像从哪来**：发布的镜像是构建时注入了版本号的（设置面板「关于」里能
+> 看到版本、也能检查更新），`--build` 现场构建的默认是 `dev`，**不做更新检查**。
+> 想让本地构建也带上版本号，用 `make image VERSION=1.0.0` 或直接给 `docker build` 传
+> `--build-arg VERSION=1.0.0`（见「自动发布与版本」一节）。
+
+> **OpenWrt 用户**：图省事可以跳过 `chown`，直接在 `docker-compose.yml` 里
+> `user: "0:0"` 用 root 跑。另外数据目录别放 `/tmp` 或 `/` 下面，
+> 放真正的挂载盘（`/mnt/sda1/...`）。理由见「常见问题 → 权限」一节。
+
+打开 `http://<NAS的IP>:8080` 即可。
+
+想让容器以指定用户运行，在项目根目录建 `.env`：
+
+```ini
+PUID=1026
+PGID=100
+```
+
+**文件存到哪，由 `volumes` 决定。** `docker-compose.yml` 里已经标出了要改的那一行：
+
+```yaml
+volumes:
+  - /volume1/quickshare:/data    # 左边改成 NAS 上的真实路径
+```
+
+因为设了 `QS_DATA_DIR`，设置界面里的「文件存储位置」在容器里是**只读**的——
+这是有意的，理由见「[存储位置](#存储位置)」。想换地方就改这个映射，然后
+`docker compose up -d` 重建容器。
+
+不用 compose 的话，等价的命令是：
+
+```bash
+docker run -d --name quickshare \
+  -p 8080:8080 \
+  -v /volume1/quickshare:/data \
+  --user 0:0 \
+  -e QS_DATA_DIR=/data \
+  -e TZ=Asia/Shanghai \
+  --restart unless-stopped \
+  quickshare:latest
+```
+
+> 关于 `--user`：不写的话会沿用镜像里的 `USER quickshare`（uid 1000），
+> 那就要先把宿主机目录 `chown 1000:1000` 才能启动（原因见「常见问题 → 权限」）。
+> 上面写 `0:0` 是以 root 跑，省掉 chown，OpenWrt 上推荐这么用；
+> 想用普通用户就改成 `--user 1000:1000`，同时把目录 chown 到 `1000:1000`。
+
+### 方式二：直接跑二进制（NAS 支持 SSH 时）
+
+Go 编译产物是静态链接的，不需要任何运行时。
+
+**Linux / macOS 上**（装了 make）：
+
+```bash
+make dist          # 一次编出 amd64 / arm64 / armv7
+```
+
+**任何平台上**（包括 Windows，不需要 make）：
+
+```bash
+# 按 NAS 架构选一条
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/quickshare-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/quickshare-linux-arm64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o dist/quickshare-linux-armv7 .
+```
+
+> **这几条编出来的是 `dev` 版**：不带 `-ldflags -X` 注入版本号，设置面板的「关于」会显示
+> "这个构建没有配置更新检查"，`/api/config` 报的版本也是 `dev`。这是**刻意的**——自己编的
+> 二进制不该假装成某个正式版本，也不该去问远端有没有新版本。
+> 想要带版本号的构建就用上面的 `make dist`（它从 git tag 推导），或者直接从
+> [Releases](../../releases) 下已经注好版本号的产物。
+
+> **别搞混产物**：
+>
+> | 文件 | 格式 | 用在哪 |
+> |---|---|---|
+> | `dist/quickshare-linux-*` | Linux ELF，无扩展名 | **NAS** |
+> | `dist/quickshare-windows-amd64.exe` | Windows PE（`MZ` 开头） | 本机测试 |
+>
+> `.exe` 是 Windows 专属格式，**拷到 NAS 上跑不起来**；反过来 Linux 那个在 Windows 上也双击不了。
+> 判断方法：文件开头是 `MZ` 就是 Windows，是 `\x7fELF` 就是 Linux。
+
+拷过去跑起来：
+
+```bash
+scp dist/quickshare-linux-amd64 nas:/volume1/quickshare/
+ssh nas 'cd /volume1/quickshare && chmod +x quickshare-linux-amd64 && ./quickshare-linux-amd64'
+```
+
+开机自启见下面的「方式三」。
+
+---
+
+### 方式三：开机自启（systemd / OpenWrt procd）
+
+仓库里 `deploy/` 下有两个可以直接用的模板：
+
+| 文件 | 装到哪 | 用在哪 |
+|---|---|---|
+| `deploy/quickshare.service` | `/etc/systemd/system/quickshare.service` | 标准 Linux（Debian / Ubuntu / 群晖 DSM 7 等） |
+| `deploy/quickshare.init` | `/etc/init.d/quickshare` | OpenWrt（路由器上没有 systemd） |
+| `deploy/quickshare.config` | `/etc/config/quickshare` | OpenWrt 的 UCI 配置：监听地址、数据目录、口令 |
+
+systemd 那边：
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin quickshare
+sudo install -d -o quickshare -g quickshare /opt/quickshare /var/lib/quickshare
+sudo install -m 755 dist/quickshare-linux-amd64 /opt/quickshare/quickshare
+sudo install -m 644 deploy/quickshare.service /etc/systemd/system/quickshare.service
+sudo systemctl daemon-reload && sudo systemctl enable --now quickshare
+```
+
+OpenWrt 那边：
+
+```bash
+scp dist/quickshare-linux-armv7 root@router:/usr/bin/quickshare
+scp deploy/quickshare.init     root@router:/etc/init.d/quickshare
+scp deploy/quickshare.config   root@router:/etc/config/quickshare
+ssh root@router 'chmod +x /etc/init.d/quickshare && /etc/init.d/quickshare enable && /etc/init.d/quickshare start'
+```
+
+模板里有三件事是**刻意这么写的**，改之前先看一眼：
+
+- **`After=network-online.target`，不是 `network.target`。** 服务从连接推导设备身份
+  （文本页按来源 IP 区分是谁发的），而推导要用本机网卡地址表——开机自启时网卡可能还
+  没拿到地址。程序里的地址表缓存会自愈（不是 `sync.Once`），所以晚一点也能纠正回来；
+  但**早到的那几个请求会被算成另一台设备**，文本页的设备列表里就多出一台，看着像 bug。
+  多等这几秒，是为了让"第一次就是对的"。
+- **`-data` 必须显式给。** 不给的话是相对工作目录的 `./data`，而服务的工作目录由
+  systemd / procd 决定——换个启动方式数据就"不见了"。显式指定之后网页上的
+  「[文件存储位置](#存储位置)」会变成只读，这是对的：位置该由部署方式决定。
+- **数据目录别放在 overlay 上**（OpenWrt 的 `/`、群晖的系统分区）。几部电影就能把分区
+  写满，而这类分区写满的后果不只是这个服务挂掉。指到外置盘上。
+
+> 那两个自启模板**本机没法真跑**（这台开发机既没有 systemd 也没有 OpenWrt）。
+> 能验的是逻辑：`.tmp/check-procd.sh` 用桩函数把 procd 脚本跑一遍，断言 UCI 选项
+> 真的变成了命令行参数（含 `enabled=0` 时什么都不做、数据目录被建出来）。
+> 真机上的行为只能靠用户反馈。
+
+---
+
+## 使用教程
+
+装好之后，浏览器打开 `http://<这台机器的 IP>:8080`。**没有注册、没有登录页**——不设口令就直接进
+（设了口令会先看到一个输入框，见「[配置](#配置)」）。手机连同一个 WiFi 打开同一个地址就行，
+不用装 App。（Windows 上直接跑的话，右下角还有托盘图标，右键能打开页面或退出。）
+
+### 传一个文件给别人
+
+1. 打开首页，把文件拖进虚线框，或者点一下它再选文件。**支持多选**
+2. 等进度条走完，文件出现在下面的「文件列表」里
+3. 点那一行的**链接按钮**（链条图标），直链已经复制到剪贴板了
+4. 把链接发出去，对方点开就能下
+
+**截了图不用先存成文件**：`Ctrl+V` 直接粘，截图就进上传队列了。粘进来的文件会自动起名成
+`粘贴-20260916-205127.png`（同一秒里的第二张起加 `-2`、`-3`）——剪贴板里的图片原本一律叫
+`image.png`，不改名的话第二张会被当成第一张的续传。**只有剪贴板里真有文件时才接管**，
+所以往搜索框里粘一段文字照常。
+
+**手机扫二维码更省事**：鼠标停在链接按钮上，二维码就弹出来。顶栏那个同款按钮出的是
+**当前页地址**的二维码——想让别人自己打开页面挑文件，用那个。
+
+> **大文件不用管。** 大文件会自动分片上传；中途断了（WiFi 掉了、手滑关了页面），
+> **再传同一个文件会从断的地方接着传**，不用从头来。传完就可以关页面，服务端已经存好了。
+>
+> 列表里**点文件名是直接在浏览器里打开**（图片 / 视频 / PDF / 文本，见
+> 「[预览与下载](#预览与下载)」那节的类型白名单）；想存到本地点右边的「下载」。
+> **想先看一眼内容再决定传不传**，点操作列那只**眼睛**——它不离开列表就盖一层预览出来，
+> 图 / 音频 / 视频 / PDF / 文本都能看，顶栏还能「上一个 / 下一个」在**当前筛出来的文件里**翻
+> （键盘 `←` `→` 也行，`Esc` 关掉）。
+
+### 发一段文本（链接、验证码、一段配置）
+
+1. 点顶栏的「文本页」按钮，进 `/text`
+2. 把内容贴进输入框，点「发送」
+3. 别的设备打开同一个 `/text` 就能看到，**点整条卡片即复制**，不用去够那个小按钮
+
+要改就点卡片上的「编辑」（改完点「保存」），不要了就点「删除」。
+
+适合发那种"不想为它专门登录一次聊天软件"的东西。发过的设备会自动出现在「设备备注」里，
+可以给它起个名字（「老王的手机」），之后列表里显示的就是这个名字。
+
+### 找东西
+
+- 文件多的时候，用列表上方的**搜索框**按文件名筛（不区分大小写），右边的**排序下拉**有六种排法。
+  两个都在前端做，敲字不额外发请求；**选过的排序会记住**（只影响这台设备）
+- 文本页可以**按内容或设备名搜索**，也能按发送设备筛选
+- 文本页点「多选」进批量模式，勾几条一次删掉。**「全选」只作用于当前筛选出来的那些**
+- **别的设备传了新东西，你的列表会自己变**，不用手动点刷新
+
+### 改外观、改自动清理、改存储位置
+
+点右上角齿轮。**面板里只显示当前这页相关的设置**，外观那几项两页都有：
+
+- **外观**：浅色 / 深色 / 跟随系统，可上传背景图，并单独调背景模糊度和各面板不透明度
+- **自动清理**：文件和文本**各一档**，填「保留 N 分钟 / 小时 / 天」。**默认 0 = 永不删除**。
+  文本那侧还有一档**「验证码过期时间」**（默认 10 分钟）——整条是 4~8 位数字，或者短文里
+  带着「验证码」这类关键词和数字，就按这一档清理
+- **存储位置**：直接改数据目录，改完立即生效，可以顺手把已有文件一起迁过去
+  （用 `-data` / `QS_DATA_DIR` 指定过就锁死了，Docker 部署必然是这种情况）
+
+**单个内容的时长在列表里就地改**：点那枚时长标记（写着「还剩 3 天」或「永久保留」），
+填新的时长回车即可。填 **0 = 跟随全局设置**（**不是**"永不删除"，提示里会写出全局值是多少）。
+
+### 删东西
+
+- **文件**：列表每行右侧的「删除」，**同时清磁盘**
+- **文本**：卡片上的删除，或者进「多选」批量删
+- **设备记录**：文本页的「设备备注」面板里能删。**删设备不会删掉它发过的文本**（有意的）
+
+---
+
+## 功能详解
+
+上面那张清单是"有什么"，这一节是"为什么这么做"。**每一项都记着取舍和被否掉的方案**，
+改之前值得先看一眼——里面写过的坑，多半已经踩过一次了。
+
+### 外观与主题
 
 主题和背景图**存在服务端**，不是浏览器本地。所以换设备、换浏览器打开都是同一套外观；
 在手机上换成深色，回到电脑刷新也是深色。
@@ -116,7 +389,7 @@ Escape 关面板这件事有两层监听器（`settings.js` 一个，文本页�
 因为面板的监听器先注册、跑完面板已经 `hidden` 了，页面那层再看 `isOpen()` 就是 `false`，
 于是**一次 Escape 会同时关面板和退出多选**。
 
-### 关于切页观感（文件页 ⇄ 文本页）
+### 切页观感
 
 两个页面是**两个独立文档**，点顶栏那个图标就是一次完整导航。浏览器默认换页是「硬切」：
 上一帧还是旧页面，下一帧整个换成新页面，中间没有任何过渡——这就是"闪一下"的来源。
@@ -159,7 +432,7 @@ Escape 关面板这件事有两层监听器（`settings.js` 一个，文本页�
 > `[hidden] { display: none !important; }`——两者混用的话 `!important` 会赢，
 > 元素永远显示不出来。现在统一走 `hidden` 属性。
 
-### 关于存储位置
+### 存储位置
 
 数据目录可以在设置界面里改，**改完立即生效**，不需要重启。流程是：
 
@@ -188,8 +461,7 @@ Escape 关面板这件事有两层监听器（`settings.js` 一个，文本页�
 Linux `~/.config/quickshare/config.json`）。**这个文件刻意放在数据目录之外**：
 数据目录位置本身是可配置的，把它存在数据目录里就成了鸡生蛋。
 
-
-### 关于预览与下载
+### 预览与下载
 
 列表每行有**两个**入口，分工不同：
 
@@ -289,7 +561,7 @@ Linux `~/.config/quickshare/config.json`）。**这个文件刻意放在数据�
 > 内网自用不等于可以不做这些。局域网里任何一台中招的机器都能往这儿传文件，
 > 而"点开看看"是人的本能。
 
-### 关于复制链接与二维码
+### 复制链接与二维码
 
 列表每行右侧、顶栏右侧各有一个**链接图标**按钮，行为一致：
 
@@ -314,12 +586,12 @@ Linux `~/.config/quickshare/config.json`）。**这个文件刻意放在数据�
 判成"离开按钮"，浮层自己收起来又弹出来，闪个不停。二维码浮层**固定白底**，不跟主题走
 ——深色底会把黑白对比度毁掉，直接扫不出来。
 
-### 关于自动刷新
+### 自动刷新
 
 别的设备传了文件，这边的列表会自己更新，不用手动点「刷新」；文本页同理。
 用的是 **SSE 长连接**（`GET /api/events`），不是定时轮询：服务端一有变更就推一条通知过来，
 空闲时一个请求都不发。**两个页面共用这一条连接**，服务端按主题（`files` / `texts`）分发，
-各自只刷新自己关心的部分——为什么不能用一个信号代表"有事发生"，见下方「关于文本发送」。
+各自只刷新自己关心的部分——为什么不能用一个信号代表"有事发生"，见下方「文本发送」。
 
 几个刻意的选择：
 
@@ -353,7 +625,13 @@ NAT 表或反向代理当成空闲连接掐掉，而前端可能过很久才发�
 > 响应里带了 `X-Accel-Buffering: no` 让 Nginx 放行；如果自己写了 `proxy_buffering on`，
 > 记得给这条路径单独关掉。
 
-### 关于文本发送
+**变更推送走独立的 `texts` 主题。** SSE 通道是两个页面共用的，服务端按主题区分
+（`files` / `texts`），前端只处理自己关心的那个。早先的设计是「一个信号代表有事发生」，
+加第二个主题时就不成立了：通道缓冲只有 1，两个主题同时变化会合并成一个信号，
+于是只有一个页面刷新，另一个要等下次变更——偶发、难复现。现在每个订阅者记一个脏主题
+集合，同一主题变十次只通知一次，不同主题不会互相吞掉。
+
+### 文本发送
 
 首页顶栏那个气泡图标通向 `/text`。贴一段文本 → 发送 → 另一台设备打开同一个地址就能看到。
 用途就是「有些时候只是想发个链接或验证码，不想为此登录一次聊天软件」。
@@ -489,6 +767,13 @@ QS_TRUSTED_PROXIES=172.16.0.0/12,::1     # 网段也行，逗号分隔
 单条 `DELETE` 仍保持 `404` 语义（那是明确的"你要删的东西不在"）。单次上限 1000 个 ID，
 而且**在落库之前**就拦掉：真拿 1001 个 ID 去查会顶到 SQLite 的绑定变量上限。
 
+**访问控制跟文件列表同级。** 不额外设口令：文本接口和 `/api/files` 走同一个鉴权包装，
+`QS_ADMIN_TOKEN` 为空时一起放行、设了就一起要口令。文本页本身是公开的（否则开了口令
+连输口令的界面都看不到），但接口要鉴权。读设置（含保留时长）是公开的——文本页首帧就要
+拿它显示提示；写设置要管理权限。
+
+### 保留时长与自动清理
+
 **自动清理按「发布时间」算，不是最后修改时间。** 编辑一下就续命会让「1 小时后自动清掉」
 变得不可预测——用户改个错别字，那条文本就又多活一天。文件那边同理，按上传时间算。
 清理周期 10 分钟，和上传分片的过期清理跑在同一个循环里。
@@ -519,6 +804,8 @@ QS_TRUSTED_PROXIES=172.16.0.0/12,::1     # 网段也行，逗号分隔
 界面上的 0 也必须写成人话（「不自动删除，文本会一直留着」）——只写「0 天」会被理解成
 「立刻就删」。
 
+### 设置面板
+
 **设置面板按页拆分。** 文件页只看得到文件页的设置（文件保留时间、文件存储位置、以及
 「上传区 / 文件列表」两个不透明度滑块），文本页只看得到文本页的（文本保留时间、验证码
 过期时间、设备记录）。**外观那几块两页都有**——主题、背景图、模糊度、顶栏不透明度是
@@ -527,24 +814,13 @@ QS_TRUSTED_PROXIES=172.16.0.0/12,::1     # 网段也行，逗号分隔
 
 **设置面板支持 `/#settings` 深链。** 文本页那句「保留 N 天」的 `href` 就指向它
 （面板现在两页共用，JS 跑起来时点击被拦下、直接在本页开，`href` 只剩兜底作用，
-详见「关于外观设置」）。开面板时用
+详见「外观与主题」）。开面板时用
 `history.replaceState` 同步地址栏而不是 `location.hash`，后者会往历史里塞一条，
 用户按返回键只会关掉面板而不是离开页面。另外**只在 `init()` 里判一次 hash 是不够的**：
 用户已经站在首页时改 hash 走的是同文档导航，文档不重新加载、`init()` 不会再跑，
 所以还监听 `hashchange` 兜住这种情况。
 
-**访问控制跟文件列表同级。** 不额外设口令：文本接口和 `/api/files` 走同一个鉴权包装，
-`QS_ADMIN_TOKEN` 为空时一起放行、设了就一起要口令。文本页本身是公开的（否则开了口令
-连输口令的界面都看不到），但接口要鉴权。读设置（含保留时长）是公开的——文本页首帧就要
-拿它显示提示；写设置要管理权限。
-
-**变更推送走独立的 `texts` 主题。** SSE 通道是两个页面共用的，服务端按主题区分
-（`files` / `texts`），前端只处理自己关心的那个。早先的设计是「一个信号代表有事发生」，
-加第二个主题时就不成立了：通道缓冲只有 1，两个主题同时变化会合并成一个信号，
-于是只有一个页面刷新，另一个要等下次变更——偶发、难复现。现在每个订阅者记一个脏主题
-集合，同一主题变十次只通知一次，不同主题不会互相吞掉。
-
-### 关于桌面托盘（仅 Windows）
+### 桌面托盘（仅 Windows）
 
 Windows 上跑起来后，右下角通知区域会有一个图标，**右键**出菜单：
 
@@ -574,246 +850,761 @@ Linux / macOS **没有**这个功能，而且是刻意不做：NAS 上的实例�
 
 ---
 
-## 快速开始
+## 配置
 
-### 方式一：Docker（推荐）
+环境变量（Docker）或命令行参数（二进制）：
 
-**用发布好的镜像**（多架构：amd64 / arm64 / armv7，会自动选对）：
+| 环境变量 | 参数 | 默认值 | 说明 |
+|---|---|---|---|
+| `QS_ADDR` | `-addr` | `:8080` | 监听地址 |
+| `QS_DATA_DIR` | `-data` | `./data` | 数据目录。**设了就锁定设置界面里的存储位置** |
+| `QS_ADMIN_TOKEN` | — | 空 | 访问口令。留空 = 内网免鉴权 |
+| `QS_TRAY` | `-tray` | `true` | 是否显示系统托盘图标（仅 Windows 生效） |
+| `QS_CHUNK_SIZE` | — | `8388608` | 分片大小（字节），默认 8 MiB |
+| `QS_MAX_FILE_SIZE` | — | `0` | 单文件上限（字节），0 表示不限 |
+| `QS_UPLOAD_TTL_HOURS` | — | `24` | 未完成上传保留时长（小时），超时自动清理 |
+| `QS_UPDATE_CHECK` | — | `true` | 是否允许联网检查更新。**完全不出网的内网设成 `0`** |
+| `QS_UPDATE_SOURCE` | — | `github` | 问哪个源：`github` 或 `dockerhub`。**GitHub 仓库是私有的就用 `dockerhub`**（见「网页端怎么检测更新」） |
+| `QS_UPDATE_REPO` | — | 构建时注入的仓库 | 检查哪个仓库，`owner/name`，**属于 `QS_UPDATE_SOURCE` 那个源**。`github` 源下留空是回落到注入值、不是"不检查"；`dockerhub` 源下**必须显式给**，否则检查会被关掉 |
+| `QS_TRUSTED_PROXIES` | — | 空（一个都不信） | 反向代理的地址，逗号分隔的 IP 或网段（`10.0.0.5,172.16.0.0/12`）。**只有直连的对端在这个名单里**才会去读 `X-Forwarded-For`，见「[反向代理下怎么取设备身份](#反向代理下怎么取设备身份)」 |
+
+布尔型环境变量认 `1/0`、`true/false`、`yes/no`、`on/off`，写别的会打印一行提示并退回默认值。
+
+数据目录的**来源**决定它能不能在界面上改：
+
+| 来源 | 界面里 |
+|---|---|
+| `-data` 参数或 `QS_DATA_DIR` | 只读（部署方已经明确指定了） |
+| 都没有，走默认值 | 可改，改完记进系统配置目录 |
+
+优先级是：命令行参数 / 环境变量 > 系统配置目录里记的值 > 默认 `./data`。
+
+---
+
+## HTTP 接口
+
+### 公开
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/` | 首页（主题与资源版本号已写进 HTML） |
+| `GET` | `/text` | 文本页。同样在 HTML 里注入主题与资源版本号；**没设口令时还会把输入框/列表上的 `hidden` 摘掉**，让首帧就有内容（见「关于切页观感」） |
+| `GET` | `/api/config` | 服务配置：分片大小、单文件上限、是否需要口令、**当前版本号**（构建时注入的），以及**发起本次请求的地址**（`clientIp`——设备身份就是它，页面据此在还没发过文本时也能显示「本机是哪台」；配了 `QS_TRUSTED_PROXIES` 时是转发头里解出来的那个） |
+| `GET` | `/api/settings` | 外观设置。公开，因为首帧就要套上主题 |
+| `GET` | `/api/version` | 版本与更新状态。**立刻返回缓存**，同时在后台去问配置的那个源（GitHub Releases 或 Docker Hub 的 tag 列表，见「网页端怎么检测更新」）；第一次会是 `checking: true`、`latest` 为空。`enabled` 表示"有没有配更新检查"，`latest` 为空时要靠它区分"没配"和"配了但读不到"。版本号不敏感，没设口令的部署同样该看到更新提示 |
+| `GET` | `/api/background` | 背景图。URL 带内容哈希，可长缓存 |
+| `GET` | `/f/{id}/{name}` | 下载。支持 Range；`?dl=1` 强制下载而非预览。`/f/{id}`（不带文件名）同样可用——**`{name}` 服务端根本不读**，只是让链接末尾带上真实扩展名，浏览器和用户看着清楚 |
+| `GET` | `/api/qr?d=<内容>` | 把 `d` 的内容画成二维码 PNG。内容完全由调用方给，服务端不读自己的任何数据，故不需要口令 |
+
+`/style.css`、`/app.js`、`/live.js`、`/text.js`、`/settings.js` 带 `?v=<内容哈希>` 时返回
+`Cache-Control: immutable`，不带时要求重新校验。版本号在启动时按内嵌资源内容算出，
+改前端不用手动改版本。两个页面共用同一个版本号。
+
+### 需要口令（设置 `QS_ADMIN_TOKEN` 后需带 `X-Admin-Token` 请求头）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/upload/init` | 创建上传任务，返回 uploadId 与已收到的分片。`mime` 由客户端声明（没给就按扩展名兜底），但**文本类文件会被规范化成 `text/plain`**（见「文本类文件」一节） |
+| `PUT` | `/api/upload/{id}/{idx}` | 上传第 idx 个分片（body 为分片原始字节） |
+| `GET` | `/api/upload/{id}/status` | 查询已收到的分片，用于续传 |
+| `POST` | `/api/upload/{id}/complete` | 合并分片，生成正式文件。返回的文件对象与 `GET /api/files` 同构（含 `preview`） |
+| `DELETE` | `/api/upload/{id}` | 取消上传 |
+| `GET` | `/api/files` | 文件列表。每条带 `ttlSeconds`（单条覆盖，`0` 表示跟随全局设置）、`expiresAt`（服务端算好的到期时刻，`0` 表示不会自动删）和 `preview`（`image` / `video` / `audio` / `pdf` / `text`，**空串表示只能下载**；前端只认这个字段，不按 MIME 前缀自己猜，见「预览与下载」） |
+| `GET` | `/api/events` | 变更推送（SSE 长连接）。事件只有名字（`files` / `texts`），载荷固定为 `{}` |
+| `DELETE` | `/api/files/{id}` | 删除文件 |
+| `PUT` | `/api/files/{id}` | 改单个文件的保留时长：`{"ttlSeconds":7200}`。`0` 表示改回「跟随全局设置」；取值 `0..864000000`（10000 天），越界 `400`，不存在 `404` |
+| `GET` | `/api/stats` | 概览统计 |
+| `POST` | `/api/version/check` | 绕过缓存同步查一次更新（「检查更新」按钮用）。要口令：它会让服务端去访问外网，公开的话局域网里谁都能拿它烧掉 GitHub 的接口配额 |
+| `GET` | `/api/texts` | 文本列表。每条带 `deviceName`（备注优先，否则是 UA 解析出来的名字）、`isCode`（有没有被识别成验证码）、`ttlSeconds` 与 `expiresAt` |
+| `POST` | `/api/texts` | 发一条文本：`{"content":"..."}`。发送方由服务端从连接推导，请求体里的 `deviceId` **会被忽略**。内容会当场判定 `isCode` 并落库 |
+| `PUT` | `/api/texts/{id}` | 改内容或保留时长：`{"content":"..."}` 和 `{"ttlSeconds":600}`，**至少传一个**，都不传返回 `400`。内容变了会重新判定 `isCode`；不存在返回 `404` |
+| `DELETE` | `/api/texts/{id}` | 删一条文本。不存在返回 `404` |
+| `POST` | `/api/texts/delete` | 批量删：`{"ids":["..."]}`。返回 `{"ok":true,"deleted":N}`，`N` 是**实际删掉的条数**，ID 不存在不算错误。空数组或超过 1000 个 ID 返回 `400` |
+| `GET` | `/api/devices` | 设备列表（发过文本的设备）。每台带 `isMe`（是不是发起本次请求的那台）和 `textCount`（还剩几条文本） |
+| `PUT` | `/api/devices/{id}` | 改设备备注：`{"remark":"..."}`。传空串表示恢复成 UA 解析出来的名字 |
+| `DELETE` | `/api/devices/{id}` | 删设备记录（含备注）。**不碰它的文本**，那些文本还在，只是发送方回落成「未知设备」。不存在返回 `404` |
+| `PUT` | `/api/settings` | 修改外观与清理设置：`theme`、`bgBlur`、`opacity{topbar,upload,files}`、`textTTL{value,unit}`、`fileTTL{value,unit}`、`codeTTL{value,unit}`、`pruneDevices`，字段可单独传 |
+| `POST` | `/api/background` | 上传背景图（body 为图片原始字节） |
+| `DELETE` | `/api/background` | 移除背景图 |
+| `GET` | `/api/storage` | 当前数据目录、是否只读、只读原因 |
+| `PUT` | `/api/storage` | 切换数据目录：`{"path":"...","migrate":true}` |
+
+`PUT /api/settings` 里有**三档保留时长**：`textTTL`（文本）、`fileTTL`（文件）、`codeTTL`
+（文本里被识别成验证码的那些）。每档是 `{value, unit}`：`value` 取 `0..10000` 的整数，
+`unit` 只认 `"minute"` / `"hour"` / `"day"`。两个子字段可以单独传——只传 `value` 时单位保持
+原样。越界值、非法单位返回 `400`，且**校验全部通过才落库**，不会留下「值写进去了、单位被
+拒了」这种半截状态。`GET /api/settings` 会把三档都带回来，单位认不出来时回落到 `day`。
+
+**`codeTTL` 的 `0` 和另外两档不是一回事**，这是三档里最容易搞错的一处：`textTTL` / `fileTTL`
+的 `0` 是「永不自动删除」（也是默认值），而 `codeTTL` **没设过时等于默认 10 分钟，显式写 `0`
+才是「关掉这条规则」**。所以服务端要区分「键不存在」和「键存在且为 0」——混了的话，用户明明
+关掉的规则会悄悄生效，10 分钟后把刚发出去的验证码删掉，而界面上看不出任何异常。
+
+生效优先级是 **单条覆盖 > 验证码规则 > 全局设置**。单条覆盖存在每条记录自己的 `ttlSeconds`
+字段里（`0` = 跟随全局），只有文本和文件有；验证码那档只作用于文本。
+
+**解析不出来就当没设。** 值解析不了、单位认不出、值为 0 或负数，一律视为「未启用清理」。
+方向刻意保守：宁可留着让用户手动删，也不要因为一个解析不了的值把人家攒的东西清空。
+界面上的 0 也必须写成人话（「不自动删除，文本会一直留着」）——只写「0 天」会被理解成
+「立刻就删」。
+
+`PUT /api/settings` 的 `pruneDevices` 是布尔值，控制「设备随消息删除」：`true` 表示某台设备
+一条文本都不剩时连它的记录（含备注）一起删。**默认关闭**，缺省或认不出来的值一律当关闭
+——多删一次设备记录比少删一次难解释。打开的那一刻会立刻清一遍已经空掉的设备（见上方
+「文本发送」）。
+
+`POST /api/texts` 的设备名由服务端从请求头的 `User-Agent` 解析，不由前端传——两处各解析
+一遍迟早会不一致。设备身份则是**客户端 IP**（见上方「文本发送」），同样由服务端从连接
+推导，请求体里带 `deviceId` 不会被采信；从本机访问时统一记为 `localhost`。
+`GET /api/config` 会回显这个标识（`clientIp`），页面据此在还没发过文本时也能显示「本机是哪台」。
+
+`PUT /api/settings` 的请求体是增量的，只传要改的字段，比如 `{"bgBlur":12}` 或
+`{"opacity":{"files":60}}`。校验**全部通过才落库**，避免出现"主题存了、模糊度没存"
+这种半截状态。响应始终是完整的设置对象，前端拿回来直接整体套用。
+
+`PUT /api/storage` 成功时返回新目录；跨盘迁移时额外带 `leftBehind`（旧数据所在目录）。
+目录被锁定时返回 `409`，路径非法返回 `400`。切换过程中其它请求一律 `503`。
+
+---
+
+## 数据目录
+
+```
+data/
+├── quickshare.db        # SQLite：文件名、大小、上传时间、外观设置、共享文本、设备备注、
+│                        #         以及三档保留时长（全局设置 + 每条记录的单条覆盖）
+├── files/<id>           # 文件本体，文件名是随机 ID
+├── chunks/<id>/<n>      # 上传中的分片，合并完成后自动删除
+└── background           # 背景图（只有一张，未设置时不存在）
+```
+
+**文件本体不进数据库**。落盘用随机 ID 当文件名、原始文件名存库——既避免重名覆盖，也天然杜绝路径穿越。
+**共享文本相反**：它只有几 KB，直接存库，换来的是编辑、删除、排序都能用一条 SQL 表达。
+
+数据目录本身的位置记在**数据目录之外**：
+
+```
+%AppData%\quickshare\config.json      # Windows
+~/.config/quickshare/config.json      # Linux / macOS
+```
+
+原因很简单：数据目录位置是可配置的，把它存在数据目录里就成了鸡生蛋——
+下次启动得先知道数据目录在哪，才能读到"数据目录在哪"这句话。
+
+---
+
+## 常见问题
+
+**上传大文件卡住或失败？**
+`QS_CHUNK_SIZE` 调大不一定更好，反而会放大单次失败的影响。8 MiB 对千兆内网比较平衡；机械硬盘可以调到 4 MiB。
+
+**容器启动后报 `mkdir /data/files: permission denied`？**
+
+这不是程序的问题，是挂载进来的目录属主不对。**启动日志里会直接把下面这两种解法
+打出来**，照做即可。关键点：**bind mount 会把镜像里 `/data` 的属主整个盖掉**
+（`Dockerfile` 里那句 `chown` 只在镜像层有效），容器能不能写完全看**宿主机上那个
+目录**的属主。而 OpenWrt / NAS 上新 `mkdir` 出来的目录默认是 `root:root`，容器又以
+非 root 运行（compose 默认 `1000:1000`），于是必然写不进去。
+
+先确认现状：
 
 ```bash
-mkdir -p ./data
-sudo chown -R 1000:1000 ./data
-
-docker run -d --name quickshare \
-  -p 8080:8080 \
-  -v ./data:/data \
-  --user 1000:1000 \
-  --restart unless-stopped \
-  <你的用户名>/quickshare:latest
+ls -ldn /mnt/sda1/quickshare          # 宿主机上看属主（-n 显示数字 uid）
+docker compose exec quickshare id     # 容器里实际以什么 uid 跑
 ```
 
-**或者用仓库里的 compose 现场构建**：
+两个数字对不上，就是问题所在。选一个解法：
 
-```bash
-mkdir -p ./data
-
-# 如果 NAS 上目录属主不是 1000:1000，先改权限
-# （群晖上 uid 常见是 1026，威联通常见是 1000）
-sudo chown -R 1000:1000 ./data
-
-docker compose up -d --build
-```
-
-> 两种方式的区别只在**镜像从哪来**：发布的镜像是构建时注入了版本号的（设置面板「关于」里能
-> 看到版本、也能检查更新），`--build` 现场构建的默认是 `dev`，**不做更新检查**。
-> 想让本地构建也带上版本号，用 `make image VERSION=1.0.0` 或直接给 `docker build` 传
-> `--build-arg VERSION=1.0.0`（见「自动发布与版本」一节）。
-
-> **OpenWrt 用户**：图省事可以跳过 `chown`，直接在 `docker-compose.yml` 里
-> `user: "0:0"` 用 root 跑。另外数据目录别放 `/tmp` 或 `/` 下面，
-> 放真正的挂载盘（`/mnt/sda1/...`）。理由见「常见问题 → 权限」一节。
-
-打开 `http://<NAS的IP>:8080` 即可。
-
-想让容器以指定用户运行，在项目根目录建 `.env`：
-
-```ini
-PUID=1026
-PGID=100
-```
-
-**文件存到哪，由 `volumes` 决定。** `docker-compose.yml` 里已经标出了要改的那一行：
+**OpenWrt 上最省事 —— 让容器以 root 跑。** 改 `docker-compose.yml`：
 
 ```yaml
-volumes:
-  - /volume1/quickshare:/data    # 左边改成 NAS 上的真实路径
+user: "0:0"
 ```
 
-因为设了 `QS_DATA_DIR`，设置界面里的「文件存储位置」在容器里是**只读**的——
-这是有意的，理由见上面「关于存储位置」。想换地方就改这个映射，然后
-`docker compose up -d` 重建容器。
+内网自用场景够安全，也是 OpenWrt 上最常见的做法（OpenWrt 的用户体系本来就弱，
+`/etc/passwd` 里往往没有 uid 1000 这个用户）。
 
-不用 compose 的话，等价的命令是：
+**想保持非 root —— 去宿主机上把属主改成和 `user:` 一致：**
 
 ```bash
-docker run -d --name quickshare \
-  -p 8080:8080 \
-  -v /volume1/quickshare:/data \
-  --user 0:0 \
-  -e QS_DATA_DIR=/data \
-  -e TZ=Asia/Shanghai \
-  --restart unless-stopped \
-  quickshare:latest
+mkdir -p /mnt/sda1/quickshare
+chown -R 1000:1000 /mnt/sda1/quickshare
+chmod 755 /mnt/sda1/quickshare
 ```
 
-> 关于 `--user`：不写的话会沿用镜像里的 `USER quickshare`（uid 1000），
-> 那就要先把宿主机目录 `chown 1000:1000` 才能启动（原因见「常见问题 → 权限」）。
-> 上面写 `0:0` 是以 root 跑，省掉 chown，OpenWrt 上推荐这么用；
-> 想用普通用户就改成 `--user 1000:1000`，同时把目录 chown 到 `1000:1000`。
+`chown` 用数字 uid 就行，不必先在 `/etc/passwd` 里建用户。然后在 `.env` 里写
+`PUID=1000` / `PGID=1000`（群晖常见 1026，威联通常见 1000）。
 
-### 方式二：直接跑二进制（NAS 支持 SSH 时）
+> 反过来也要注意：**如果之前用 root 跑过，`/data` 里的文件属主是 `root`**，
+> 现在切成非 root，容器里那个用户改不动这些文件（读还行，覆盖和删除都不行）。
+> 再 `chown -R 1000:1000` 一次即可。
 
-Go 编译产物是静态链接的，不需要任何运行时。
+> 顺带一提：如果挂的是 **named volume**（`quickshare-data:/data`）而不是 bind
+> mount，Docker 首次创建卷时会把镜像里 `/data` 的内容和属主一起复制过去，
+> 就不会有这个问题——代价是文件不在你能直接翻的目录里。
 
-**Linux / macOS 上**（装了 make）：
+> **OpenWrt 上还有两个坑，和权限无关但一样致命：**
+> - **别把数据目录放在 `/tmp`** —— 那是 tmpfs，重启就没了。
+> - **别放在 `/` 下面**（比如 `/data`）—— 那在 overlay 上，空间只有你分给
+>   overlay 的那点额度，传几个大文件就把系统盘撑爆，sysupgrade 的备份也会变得巨大。
+>   放到真正的挂载盘上：`/mnt/sda1/quickshare` 这样。
 
-```bash
-make dist          # 一次编出 amd64 / arm64 / armv7
-```
+**想加访问控制？**
+最简单是在前面挂一层反向代理（Caddy / Nginx Proxy Manager）做 HTTP Basic Auth。
+如果只是想在局域网里挡一下，设 `QS_ADMIN_TOKEN` 就够了。
 
-**任何平台上**（包括 Windows，不需要 make）：
+**Windows 上没看到托盘图标？**
+多半是被收进任务栏那个 `^` 溢出区了——Windows 默认把新出现的图标藏起来。
+点开溢出区把它拖到任务栏上，之后系统会记住。
+如果连溢出区里都没有，看启动日志里有没有 `托盘图标 未启用: ...` 这一行；
+用 `-tray=false` 启动过、或者根本没有交互式桌面会话（比如跑在服务里）都会没有图标。
 
-```bash
-# 按 NAS 架构选一条
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/quickshare-linux-amd64 .
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/quickshare-linux-arm64 .
-CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o dist/quickshare-linux-armv7 .
-```
+**设置界面里的「文件存储位置」是灰的？**
+说明数据目录是启动时用 `-data` 或 `QS_DATA_DIR` 明确指定的。
+Docker 部署必然是这种状态——容器里能看到的只有映射进去的目录，
+在界面上指到别处等于写进容器可写层，容器一重建就没了。
+要换位置请改 `docker-compose.yml` 里的 `volumes` 映射，然后 `docker compose up -d`。
 
-> **这几条编出来的是 `dev` 版**：不带 `-ldflags -X` 注入版本号，设置面板的「关于」会显示
-> "这个构建没有配置更新检查"，`/api/config` 报的版本也是 `dev`。这是**刻意的**——自己编的
-> 二进制不该假装成某个正式版本，也不该去问远端有没有新版本。
-> 想要带版本号的构建就用上面的 `make dist`（它从 git tag 推导），或者直接从
-> [Releases](../../releases) 下已经注好版本号的产物。
+**改了存储位置，旧目录里还有文件？**
+跨盘迁移时**不会自动删原件**（自动删是省事，但万一新盘有问题就两头空）。
+响应里会告诉你旧数据留在哪，确认新目录一切正常后自己删掉即可。
+同一个盘上切换走的是 `rename`，是整体搬走，不会留东西。
 
-> **别搞混产物**：
->
-> | 文件 | 格式 | 用在哪 |
-> |---|---|---|
-> | `dist/quickshare-linux-*` | Linux ELF，无扩展名 | **NAS** |
-> | `dist/quickshare-windows-amd64.exe` | Windows PE（`MZ` 开头） | 本机测试 |
->
-> `.exe` 是 Windows 专属格式，**拷到 NAS 上跑不起来**；反过来 Linux 那个在 Windows 上也双击不了。
-> 判断方法：文件开头是 `MZ` 就是 Windows，是 `\x7fELF` 就是 Linux。
+**为什么有的文件没有「预览」按钮？**
+只有五类会显示：图片、音频、视频、PDF、文本（`text/*` 与 JSON）。**Word / PowerPoint
+不在里面**，原因见「[预览与下载](#预览与下载)」——浏览器原生不认这两种格式，
+而在线预览方案又要求文件能被公网访问，这是个内网服务，够不着。压缩包、可执行文件同理：
+它们没有可渲染的内容。
 
-拷过去跑起来：
+**点了预览却说「这个格式当前浏览器放不出来」？**
+类型在服务端白名单里，**不等于你这个浏览器放得出来**：`.mov` 要看有没有装解码器、
+`.tiff` 基本没有浏览器认、`.flac` 在旧 Safari 上也不行。这时候点顶栏的「在新标签页打开」
+或「下载」——服务端按正确的内容类型发出去了，是浏览器自己解不了。
 
-```bash
-scp dist/quickshare-linux-amd64 nas:/volume1/quickshare/
-ssh nas 'cd /volume1/quickshare && chmod +x quickshare-linux-amd64 && ./quickshare-linux-amd64'
-```
+**粘了张图，怎么没反应？**
+先确认剪贴板里真的是**图片文件**：有些截图工具（以及微信/QQ 的部分版本）放进剪贴板的是
+一段位图数据，浏览器这边拿不到文件，程序也就认不出来——存成文件再拖进来即可。
+另外**只有剪贴板里有文件时才会接管粘贴**，粘一段文字是原样放过去的（搜索框照常收到）。
+页面本身没有别的限制，`Ctrl+V` 在哪儿按都行。
 
-开机自启见下面的「方式三」。
+**能装在 OpenWrt 路由器上吗？**
+看架构。**ARM（armv7 / arm64）和 x86 的可以，MIPS 的不行。**
+
+MIPS 不是没编，是**编不出来**：SQLite 用的是纯 Go 实现（`modernc.org/sqlite`），它依赖的
+`modernc.org/libc` 没有 mips / mipsle 的移植，`mips64le` 那部分也是坏的（实测三种都失败）。
+**ramips、ath79 那一大批路由器因此直接出局**。先 `uname -m` 看一眼，或者查一下你的机型是
+哪个 target；`aarch64_*` / `arm_*` / `x86_64` 都能跑，`riscv64` 也试过可以。
+
+跑得起来的话，用 `deploy/` 里那套（scp 二进制 + procd 脚本）就够了，**不需要做 ipk / apk 包**：
+Go 静态二进制跟内核版本无关（22.03 是 5.10、24.10 是 6.6、25.12 是 6.12，卡这个的是 kmod），
+而包格式反而分了两代——**25.12 起换成了 apk，24.10 及以前是 opkg**，做包得每个发行版一份
+SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`"。
+
+> 另外留意体积和内存：产物 11 MB，而不少路由器整个 flash 才 16–32 MB；纯 Go 的 SQLite
+> 也比 C 版吃内存，64 MB 的老机器会比较勉强。
 
 ---
 
-### 方式三：开机自启（systemd / OpenWrt procd）
+## 源码结构
 
-仓库里 `deploy/` 下有两个可以直接用的模板：
-
-| 文件 | 装到哪 | 用在哪 |
-|---|---|---|
-| `deploy/quickshare.service` | `/etc/systemd/system/quickshare.service` | 标准 Linux（Debian / Ubuntu / 群晖 DSM 7 等） |
-| `deploy/quickshare.init` | `/etc/init.d/quickshare` | OpenWrt（路由器上没有 systemd） |
-| `deploy/quickshare.config` | `/etc/config/quickshare` | OpenWrt 的 UCI 配置：监听地址、数据目录、口令 |
-
-systemd 那边：
-
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin quickshare
-sudo install -d -o quickshare -g quickshare /opt/quickshare /var/lib/quickshare
-sudo install -m 755 dist/quickshare-linux-amd64 /opt/quickshare/quickshare
-sudo install -m 644 deploy/quickshare.service /etc/systemd/system/quickshare.service
-sudo systemctl daemon-reload && sudo systemctl enable --now quickshare
+```
+.
+├── main.go                     # 入口：配置、启动、优雅关闭、托盘接线
+├── main_test.go                # localURLOf / portOf / envBool / updateTarget 的单元测试
+├── config.go                   # 启动配置（数据目录位置），存在数据目录之外
+├── internal/
+│   ├── desktop/
+│   │   ├── desktop_windows.go  # 托盘图标 + 用默认浏览器打开链接（Win32 直调）
+│   │   ├── desktop_windows_test.go  # 内嵌图标能否转成图标句柄、托盘能否挂上
+│   │   ├── desktop_stub.go     # 非 Windows 平台的空实现
+│   │   ├── desktop_stub_test.go     # 断言非 Windows 下 Supported() 必须为 false
+│   │   │                            # （带 //go:build !windows，Windows 开发机上不编译、不执行）
+│   │   ├── gen-icon.py         # 换图标时才需要跑（纯标准库，无依赖）
+│   │   └── icon.png            # 托盘图标，go:embed 进二进制
+│   ├── store/
+│   │   ├── store.go            # SQLite 元数据层（文件、分片、设置）+ 文件名清理 + 加列迁移
+│   │   ├── store_test.go       # SanitizeName、以及「老库加新列」的迁移测试（含幂等）
+│   │   ├── texts.go            # 共享文本与设备（备注）的数据层 + 批量删除 + 按时间清理
+│   │   └── texts_test.go       # 文本 CRUD、排序稳定性、upsert 不覆盖备注、批量删除、
+│   │                           # 单条覆盖压过验证码规则与全局设置
+│   ├── version/
+│   │   ├── version.go          # 版本信息的唯一来源（四个变量由构建时注入）+ 语义化比较
+│   │   └── version_test.go     # 版本比较的单元测试（含"认不出来一律当相等"、以及三段式判断那两组）
+│   └── server/
+│       ├── server.go           # 路由、鉴权、列表接口、静态资源缓存、后端热切换、清理循环
+│       ├── events.go           # 变更推送：SSE 长连接 + 按主题分发的广播中心
+│       ├── events_test.go      # 广播中心的单元测试（含"不同主题不被合并"）
+│       ├── asset_test.go       # 资源版本号的单元测试
+│       ├── update.go           # 更新检查：查 GitHub Releases 或 Docker Hub 的 tag 列表，带缓存、永不阻塞
+│       ├── update_test.go      # 更新检查的单元测试（假 GitHub / 假 Docker Hub，逐条钉住那些取舍）
+│       ├── upload.go           # 分片上传与合并
+│       ├── download.go         # 支持 Range 的下载 + 预览白名单（inline / sandbox / attachment）、
+│       │                       # 预览归类（previewKindOf：先问白名单再分类，不另写一份清单）
+│       ├── preview_test.go     # 预览归类的契约（有归类 ⇔ 能内联、没归类 ⇒ 只能下载）
+│       ├── qr.go               # 二维码 PNG 生成（尺寸随内容模块数动态算，短链优先）
+│       ├── qr_test.go          # 二维码接口的单元测试（参数边界、可缓存、尺寸随内容增长）
+│       ├── texts.go            # 文本与设备接口、UA 解析设备名、批量删除
+│       ├── texts_test.go       # 文本接口、设备备注、主题注入、批量删除
+│       ├── proxy.go            # 设备身份：客户端 IP 的取法（含受信代理名单）、本机地址归一
+│       ├── proxy_test.go       # 受信代理名单的解析与取值规则（含"对端不受信时一个头都不读"）
+│       ├── ttl.go              # 保留时长的唯一来源：三档解析、到期时刻、验证码识别
+│       ├── ttl_test.go         # 验证码识别的边界、单位换算、优先级、到期时刻
+│       ├── settings.go         # 设置（外观 + 三档保留时长）、页面主题注入、背景图
+│       └── storage.go          # 数据目录切换与迁移
+├── web/                        # 前端（go:embed 打进二进制）
+│   ├── index.html              # 首页：上传 + 文件列表（含搜索 / 排序工具条）
+│   ├── app.js                  # 首页逻辑：上传（拖拽/点选/粘贴）、列表渲染、搜索与排序、媒体预览、复制与二维码
+│   ├── text.html               # 文本页：发送 + 工具条（搜索/筛选/多选）+ 文本列表
+│   ├── text.js                 # 文本页逻辑：列表渲染、搜索筛选、多选、复制、设备备注
+│   ├── settings.js             # 设置面板，两页共用（标记 + 事件 + 外观逻辑都在这里）
+│   ├── live.js                 # SSE 客户端，两个页面共用
+│   └── style.css               # 两个页面共用的样式与主题变量
+├── Dockerfile
+├── docker-compose.yml
+├── deploy/                     # 开机自启模板（systemd / OpenWrt procd）
+│   ├── quickshare.service      # systemd unit
+│   ├── quickshare.init         # OpenWrt 的 procd 脚本（UCI 驱动）
+│   └── quickshare.config       # OpenWrt 的 /etc/config/quickshare 样例
+├── .dockerignore               # 别把 dist/ 和 .tmp/ 塞进构建上下文
+├── .gitattributes              # 换行符统一钉成 LF（见下）
+├── LICENSE                     # MIT，与 Dockerfile 里的 OCI label 保持一致
+├── .github/workflows/
+│   ├── ci.yml                  # 每个分支与 PR：格式 + vet + 单测 + e2e + 交叉编译
+│   ├── release.yml             # 打 v* tag：编四个平台 → 发 Release
+│   └── docker.yml              # 打 v* tag：编多架构镜像 → 推 Docker Hub
+├── Makefile                    # 需要 make；Windows 上改用上面的 go 命令
+├── pack.py                     # 打包源码快照 go.zip（纯标准库，不需要 make）
+├── dist/                       # 编译产物（已 gitignore）
+└── e2e.sh                      # 端到端冒烟测试
 ```
 
-OpenWrt 那边：
+> `.gitattributes` 里钉了 `* text=auto eol=lf`。这不是洁癖：Windows 上常见的
+> `core.autocrlf=true` 会在检出时把换行符换成 CRLF，而 `gofmt -l` **会把 CRLF
+> 的 Go 文件判成"没格式化"**（已实测），CI 的格式检查会红一片；`e2e.sh` /
+> `Makefile` 带 `\r` 更是直接不能用（bash 报 `$'\r': command not found`）。
+> 本地工作区刚好是 LF 时这些都看不出来，换个机器克隆下来才会炸。
+
+`go.zip` 是 `pack.py` 打出的**源码快照**（分享给别人看或编译用），属于派生产物，
+不入库、也不在上面这棵树里。要更新就重新跑一次：
 
 ```bash
-scp dist/quickshare-linux-armv7 root@router:/usr/bin/quickshare
-scp deploy/quickshare.init     root@router:/etc/init.d/quickshare
-scp deploy/quickshare.config   root@router:/etc/config/quickshare
-ssh root@router 'chmod +x /etc/init.d/quickshare && /etc/init.d/quickshare enable && /etc/init.d/quickshare start'
+python pack.py
 ```
 
-模板里有三件事是**刻意这么写的**，改之前先看一眼：
-
-- **`After=network-online.target`，不是 `network.target`。** 服务从连接推导设备身份
-  （文本页按来源 IP 区分是谁发的），而推导要用本机网卡地址表——开机自启时网卡可能还
-  没拿到地址。程序里的地址表缓存会自愈（不是 `sync.Once`），所以晚一点也能纠正回来；
-  但**早到的那几个请求会被算成另一台设备**，文本页的设备列表里就多出一台，看着像 bug。
-  多等这几秒，是为了让"第一次就是对的"。
-- **`-data` 必须显式给。** 不给的话是相对工作目录的 `./data`，而服务的工作目录由
-  systemd / procd 决定——换个启动方式数据就"不见了"。显式指定之后网页上的
-  「[文件存储位置](#关于存储位置)」会变成只读，这是对的：位置该由部署方式决定。
-- **数据目录别放在 overlay 上**（OpenWrt 的 `/`、群晖的系统分区）。几部电影就能把分区
-  写满，而这类分区写满的后果不只是这个服务挂掉。指到外置盘上。
-
-> 那两个自启模板**本机没法真跑**（这台开发机既没有 systemd 也没有 OpenWrt）。
-> 能验的是逻辑：`.tmp/check-procd.sh` 用桩函数把 procd 脚本跑一遍，断言 UCI 选项
-> 真的变成了命令行参数（含 `enabled=0` 时什么都不做、数据目录被建出来）。
-> 真机上的行为只能靠用户反馈。
+**它存在的理由和「为什么不能用一条 `zip` 命令」**：早先那份快照是手写文件列表生成的，
+漏掉了全部文本功能相关文件（`texts.go` ×2、`texts_test.go` ×2、`text.html`、`text.js`、
+`live.js`）——而 `server.go` 引用了 `texts.go` 里的东西，**别人拿到那份快照根本编译不过**。
+更麻烦的是漏的都是同一块功能，看着不像"漏了"，倒像"这个项目就没有文本功能"。
+所以现在改成遍历目录，并且**打完之后会把快照解到临时目录 `go vet ./...` 跑一遍**——
+清单对不对、目录全不全，都不如让编译器说一句话。
 
 ---
 
-## 使用教程
+## 测试
 
-装好之后，浏览器打开 `http://<这台机器的 IP>:8080`。**没有注册、没有登录页**——不设口令就直接进
-（设了口令会先看到一个输入框，见「[配置](#配置)」）。手机连同一个 WiFi 打开同一个地址就行，
-不用装 App。（Windows 上直接跑的话，右下角还有托盘图标，右键能打开页面或退出。）
+### 单元测试
 
-### 传一个文件给别人
+覆盖 e2e 够不着的纯函数逻辑：
 
-1. 打开首页，把文件拖进虚线框，或者点一下它再选文件。**支持多选**
-2. 等进度条走完，文件出现在下面的「文件列表」里
-3. 点那一行的**链接按钮**（链条图标），直链已经复制到剪贴板了
-4. 把链接发出去，对方点开就能下
+```bash
+go test ./...
+```
 
-**截了图不用先存成文件**：`Ctrl+V` 直接粘，截图就进上传队列了。粘进来的文件会自动起名成
-`粘贴-20260916-205127.png`（同一秒里的第二张起加 `-2`、`-3`）——剪贴板里的图片原本一律叫
-`image.png`，不改名的话第二张会被当成第一张的续传。**只有剪贴板里真有文件时才接管**，
-所以往搜索框里粘一段文字照常。
+- `internal/server/asset_test.go`：资源版本号——内容变则版本变、同内容版本稳定
+- `internal/server/qr_test.go`：二维码接口——空参数与超长参数被拒、`1024` 字节边界通过、
+  响应可长缓存、同内容出同图、不同内容出不同图、尺寸随内容增长且保持正方形
+- `internal/server/preview_test.go`：预览归类——白名单里每个类型都归得进去（含带 `charset`
+  参数、大小写、首尾空白的写法），而 HTML、JavaScript、压缩包、`application/octet-stream`、
+  Word / PowerPoint 的 MIME、空串一律归不进去。另有三条**契约断言**：**有归类 ⇒ 能内联**、
+  **没归类 ⇒ 只能下载**、SVG 归成图片但走 sandbox。它们守的是「`previewKindOf` 必须先问
+  `previewModeOf`」这件事——两份清单漂掉不会报错，只会让预览按钮点了直接下载。
+  另外三条守**上传时的文本类规范化**：`TestNormalizeUploadMime`（表里每个后缀都必须落到
+  `text/plain` 且真的可内联；不在表里的一律原样返回，一个字节都不改）、
+  `TestNormalizeUploadMimeNeverYieldsScriptable`（规范化绝不能产出可执行脚本的类型）、
+  `TestAmbiguousExtensionsStayOutOfTextExts`（`.ts` / `.sub` / `.mod` / `.bin` / `.dat` 这类
+  **同一后缀既有常见文本形态、又有常见二进制形态**的一律不许进表——`.ts` 这条是实测踩出来的）
+- `internal/server/events_test.go`：广播中心——通知能到达订阅者、注销后不再投递、
+  通知永不阻塞调用方（卡住的客户端不能拖住上传）、同一主题多次变更合并成一次、
+  **不同主题绝不被合并**（这是引入主题机制的原因本身，见上方「文本发送」）、
+  多订阅者扇出、并发调用不出错
+- `internal/server/texts_test.go`：文本与设备——UA 解析出设备名（含 Edge 不能被认成
+  Chrome 的顺序问题）、`deviceIDFromAddr` 从 `RemoteAddr` 取地址（含 IPv6 方括号，且把本机
+  自己的接口地址统一归到 `localhost`）、按字符边界截断、
+  文本 CRUD 与 `404` 语义、空内容/超长内容被拒、内容首尾空白不被抹掉、
+  设备按来源 IP 归并（同一 IP 发多次仍是一台）、`isMe` 只标记请求方那台、
+  设备列表带出 `textCount`（还剩几条文本）、
+  **删设备只删记录不动文本**（删完文本全在、发送方回落「未知设备」、重复删 `404`）、
+  删除开关默认关闭时文本删光也不清设备、打开后「还有文本的不清、删光了才清」且**批量删除那条路也生效**、
+  **打开开关会立刻清一遍已经空掉的设备**（只对"以后"生效的话用户会以为没生效）、
+  开关的读写往返与"只改主题不带跑开关"、
+  **改完备注再发一条备注不丢**（upsert 的 `DO UPDATE` 里顺手写 `remark` 就会踩）、
+  超长 UA 截断后仍是合法 UTF-8、变更推送 `texts` 主题且不带上 `files`、
+  两个页面都把主题与资源版本号注进了 HTML、
+  **没开口令时文本页的输入框/列表不带 `hidden`、开口令时必须带**（`servePage` 是按
+  字面量替换的，fixture 里那两行得跟 `web/text.html` 写得一模一样，否则测的是假契约）、
+  批量删除接口（含混入不存在的 ID 要返回实际条数、空数组与超量被拒）、
+  保留时长的读写与越界拦截（只改 `value` 时 `unit` 保留、非法请求不留半截状态）、
+  清理任务只删超期的文本且**未设保留时长时一条都不动**、
+  **单条覆盖压过验证码规则、验证码规则又压过全局设置**（三档优先级只有这里钉得住）
+- `internal/server/proxy_test.go`：受信代理名单——单个 IP 与网段都能解析、**单个 IP 不会被
+  当成网段**、`10.0.0.0/99` 这种写错的项跳过而不 panic（配置写错时退化成"不信任代理"，
+  比整个服务起不来好）、空配置解析出零项；
+  `realClient` 的十二种组合，**重点是"对端不在名单里时一个头都不读"**（少了这条，
+  任何人都能编一个 `X-Forwarded-For` 冒充别的设备）、**客户端伪造的左侧条目被忽略**
+  （从右往左取）、链上多个受信代理继续往左、`unknown` 这种非 IP 不采信、
+  XFF 取不到时退回 `X-Real-IP`；
+  以及接进 `clientIP` 之后的四条：默认不读转发头、受信时读、不受信时读了也没用、
+  经代理来的回环地址仍然归一成 `localhost`
+- `internal/server/ttl_test.go`：保留时长的纯逻辑——验证码识别的边界（4~8 位数字、
+  含关键词且带连续 4 位数字、`OTP 4455` 这种英文写法、只出现 `code` 而没有数字的不算、
+  超过 200 字符的长文本即使带 `code` 和数字也不算）、
+  单位换算（`minute` / `hour` / `day`、空单位用默认、认不出的算"没设"）、
+  三档从设置里解析（**`codeTTL` 没设过给 10 分钟、显式 `0` 是关掉这条规则**）、
+  以及到期时刻的优先级（单条 > 验证码 > 全局；两档都没启用时返回 `0` = 永不删除）
+- `internal/server/update_test.go`：更新检查——没配仓库时一条请求都不发、
+  **`GET /api/version` 永不阻塞**（用"卡住的假 GitHub"证明：改回同步查就会超时）、
+  比当前新才报 `hasUpdate`、同版与更旧都不报、开发版永不提示但照样带回 `latest`、
+  **仓库还没发过 release 的 `404` 不算错误**（那是正常状态，不该显示成故障）、
+  `500` 才算错误、**失败不清空上次成功的结果**（网络抖一下不该让"有新版本"凭空消失）、
+  TTL 内只查一次（5 次调用假服务端只收到 1 次请求）、`checkNow` 能绕过缓存、
+  `/api/version` 公开而 `/api/version/check` 要口令、`/api/config` 报的是注入的版本号
+  （不是写死的 `1.0.0`）
+- `internal/store/store_test.go`：文件名清理——路径穿越、非法字符、控制字符、
+  以及超长名字的截断必须落在字符边界上（按字节切会把汉字劈成半个，落库是非法 UTF-8）；
+  还有**老库加新列的迁移**：手工建一个没有新列的老结构库，`Open()` 之后老数据还在、
+  新列拿到默认值、新列可写，而且**连开同一个库三次不报 `duplicate column name`**
+  （`schema` 里全是 `CREATE TABLE IF NOT EXISTS`，对已存在的表什么都不做；
+  SQLite 又没有 `ADD COLUMN IF NOT EXISTS`，只能 `PRAGMA table_info` 逐列查）
+- `internal/store/texts_test.go`：文本数据层——CRUD、改/删不存在的记录返回 `ErrNotFound`、
+  同一秒内创建的多条排序稳定（靠 `rowid` 兜底）、
+  `ListDevices` 带出每台的 `textCount`（删掉文本后跟着变小）、
+  **`DeleteDevice` 只删设备记录、文本与它的 `device_id` 都不动**、删不存在的设备返回 `ErrNotFound`、
+  **`PruneOrphanDevices` 只清一条文本都不剩的**（还有文本的不动、没有孤儿时返回 0）、
+  `device_id` 为空串的文本不算孤儿（那是不带设备身份的旧数据）、
+  **`TouchDevice` 不覆盖已有备注**、重复设同一个备注仍算成功、备注可清空、
+  批量删除（ID 不存在不报错、跨 `deleteBatch` 分批边界仍全删）、
+  按 `created_at` 清理（**刚编辑过的旧文本照样清掉**、`before` 边界上的记录不删）
+- `internal/version/version_test.go`：版本号比较——`1.9.0 < 1.10.0`（按字符串比会得出
+  相反结论）、`v` 前缀、缺省段（`1` / `1.2`）、预发布后缀、`+build` 元数据、
+  **认不出来的版本号一律当"相等"**（`dev`、空串、`1.2.3.4`、`1.2b`、`-1.0.0`、`1..0`
+  等等，宁可不提示更新也不误报），以及比较的反对称性
+- `internal/desktop/desktop_windows_test.go`：内嵌的 `icon.png` 必须能被转成合法的图标句柄
+  （挂了不会报错，只会悄悄退回系统默认图标），以及托盘能否真的挂上去
+- `internal/desktop/desktop_stub_test.go`：非 Windows 平台必须保持空实现——
+  一旦 `Supported()` 返回 true，`main` 就会去调 `StartTray`，白白给无头服务器添乱。
+  **注意它带 `//go:build !windows`，在 Windows 开发机上不参与编译**，
+  本机跑 `go test ./...` 是看不到它的（改 stub 时要意识到这条没被验证）
+- `main_test.go`：`localURLOf`（绑定具体 IP 时**不能**退回 `localhost`，否则托盘的
+  「打开页面」连不上）、`portOf`、`envBool`（大小写、两侧空白、非法值退回默认）、
+  `updateTarget`（**"查哪个源"的决策点，出错是静默的**——源选错只会表现为"永远没有
+  新版本提示"，没有任何报错。重点是两条：`QS_UPDATE_CHECK=0` 时源和仓库配了也不检查；
+  **`dockerhub` 源没给 `QS_UPDATE_REPO` 时必须主动关掉、不能回落到注入的 GitHub 仓库名**
+  ——回落的后果是拿 GitHub 仓库名去 Docker Hub 查，必然 404 且看不出原因）
 
-**手机扫二维码更省事**：鼠标停在链接按钮上，二维码就弹出来。顶栏那个同款按钮出的是
-**当前页地址**的二维码——想让别人自己打开页面挑文件，用那个。
+### 端到端冒烟（e2e.sh）
 
-> **大文件不用管。** 大文件会自动分片上传；中途断了（WiFi 掉了、手滑关了页面），
-> **再传同一个文件会从断的地方接着传**，不用从头来。传完就可以关页面，服务端已经存好了。
+覆盖 **324 项**断言：分片上传、断点续传、分片截断拦截、分片越界拦截
+（声明 0 字节的任务不得接收任何分片）、路径穿越防护、Range 下载内容比对（sha256）、
+预览/下载两种响应头、删除、空文件、口令鉴权、外观设置与背景图（含类型白名单、大小上限、
+主题注入、静态资源缓存）、模糊度与三块不透明度的持久化与越界拦截、
+数据目录切换（迁移 / 不迁移 / 各种拒绝情形）、同一秒内上传的排序稳定性、
+二维码接口（PNG 头、`image/png`、长缓存、`d` 缺失/为空/`1024` 字节边界、同内容同图、
+不同内容不同图、开口令时仍公开）、
+列表变更推送（`text/event-stream` 头、先收到 `ready`、上传与删除各推一次、事件不带载荷、
+客户端断开后服务端照常工作、开口令时需鉴权）、
+文本发送与设备备注（文本页与首页的入口与版本号、主题注入、按 UA 解析设备名、
+文本增改删与 `404` 语义、空内容/超长内容被拒、伪造的 `deviceId` 被忽略、
+设备 ID 就是请求方 IP 且 `isMe` 标对、改备注后备注不丢、
+清空备注回到 UA 名、`texts` 主题推送且不带上 `files`）、
+文本批量删除与自动清理设置（文本页工具条/多选条/保留时间提示的存在与指向、
+批量删除返回实际条数且不因 ID 不存在而失败、空数组与超过 1000 个 ID 被拒、
+批量删除也推 `texts` 事件、保留时长默认 `0/day`、写入与读回、只改值不改单位、
+越界与非法的 `value`/`unit` 被拒且不留半截状态、改清理设置不冲掉主题、
+设了保留时长也不会在请求路径上立刻删东西）、
+切页首帧（没开口令时文本页的输入框/列表**不带** `hidden`、开口令时**必须带**、
+两个页面的空状态提示首帧都隐藏、样式表里有 `@view-transition` 且顶栏带了
+`view-transition-name`——这几条同时守着「服务端按字面量替换」那个契约）、
+删除设备记录与「设备随消息删除」（开关默认关闭、设备列表带 `textCount`、
+**打开开关后还有文本的设备不被误清**、文本删光后设备才消失、关掉后读回为关闭、
+显式 `DELETE /api/devices/{id}` 后**文本一条都不少**且发送方回落「未知设备」、重复删 `404`）、
+版本号与更新检查（`/api/version` 公开可读、**与 `/api/config` 报同一个版本号**、
+`hasUpdate` / `checking` 必须是布尔值——前端那两处判断都靠它、
+关掉更新检查后既不报错也不提示有更新、`POST /api/version/check` 受口令保护、
+**源配置怎么被解读**（独立实例，一个远端都不问）：`dockerhub` 源没给 `QS_UPDATE_REPO` 时
+必须主动关掉并在日志里说明——**绝不能回落到注入的 GitHub 仓库名**，那是另一个命名空间、
+一定查不到又看不出原因；认不出的源值回落到 `github` 并打一行警告）、
+保留时长三档（文件 / 文本 / 验证码各自默认值与读写、`minute` 是合法单位、
+**`codeTTL` 没设过回 10 分钟而显式 `0` 是关掉规则**——这两件事混了会悄悄删掉验证码、
+单条覆盖与"跟随全局"的往返、单条值越界与不存在的 ID 返回 `404`、
+**只改保留时长不刷新 `updated_at`**（否则列表上会平白多个「已编辑」）、
+两个字段都不传返回 `400`、内容改成纯数字后 `isCode` 跟着翻、
+短信里带关键词与数字也算验证码、只出现 `code` 没有连续数字的不算、
+关掉规则后验证码按全局档走、两个列表都带上 `ttlSeconds` / `expiresAt` / `isCode`、
+**设了保留时长不会在请求路径上立刻删东西**、以及两个新接口都受口令保护）、
+以及预览安全（`text/html` 与 JS 的类型都只下载、文本类文件被规范成 `text/plain` 只读不执行、
+SVG 带 sandbox CSP、应用页面 CSP、下载路径不被套上页面 CSP）、
+预览归类字段（列表里每条都带 `preview`，且取值只落在五类或空串里——将来往白名单加了类型
+却忘了归类时不会报错，只有这条能拦住）、
+反向代理下的设备身份（独立实例，配 `QS_TRUSTED_PROXIES` 跑一遍：**没配名单时伪造的
+`X-Forwarded-For` 一个字都不采信**——默认行为改坏了就是"任何人都能冒充别的设备"、
+配了之后取从右往左第一个不受信的地址、**客户端伪造的左侧条目必须被忽略**、
+链上多级代理继续往左、只有 `X-Real-IP` 时也认、两个头都没有时退回源地址、
+以及转发来的地址真的写进了设备表而不只是回显）。
+
+> 脚本开头会把 `no_proxy` 设成 `127.0.0.1,localhost,::1`。不少开发机（含这台）设了
+> `http_proxy`，curl 连本机也走代理，**端口没人监听时代理回 `502` 而不是直连该有的 `000`**，
+> 断言里看到 502 会误以为是服务端自己返的错——排查方向整个跑偏。
+
+> 第 16 节会自己起一个**不传 `-data`** 的实例，并把 `APPDATA` / `XDG_CONFIG_HOME` 指到
+> 临时目录。前者是因为只有"数据目录来自默认值或启动配置"时界面上才允许改；
+> 后者是为了不去读（也不去写）真实用户的启动配置——否则上一次跑测试留下的
+> `dataDir` 会被捡回来，结果完全不可预期。
+
+脚本自己起实例、自己收尾，跑完不留进程，也不留测试数据：
+
+```bash
+bash e2e.sh
+```
+
+想指向一个已经在跑的实例（该实例必须挂在一个空数据目录上）：
+
+```bash
+QS_BASE=http://127.0.0.1:18080 bash e2e.sh
+```
+
+> 数据目录必须是空的：第 5 节把列表条数写死了，带着历史数据跑必然误报。
+> 不传 `QS_BASE` 时脚本会自己起一个干净的，所以正常情况直接跑就行。
 >
-> 列表里**点文件名是直接在浏览器里打开**（图片 / 视频 / PDF / 文本，见
-> 「[关于预览与下载](#关于预览与下载)」那节的类型白名单）；想存到本地点右边的「下载」。
-> **想先看一眼内容再决定传不传**，点操作列那只**眼睛**——它不离开列表就盖一层预览出来，
-> 图 / 音频 / 视频 / PDF / 文本都能看，顶栏还能「上一个 / 下一个」在**当前筛出来的文件里**翻
-> （键盘 `←` `→` 也行，`Esc` 关掉）。
+> 注意：脚本用 `curl` 读写临时文件。Windows 的 Git Bash 里 `curl` 是
+> `C:\WINDOWS\system32\curl.exe`，不认 `/tmp` 这类 POSIX 路径（表现为
+> `size_download` 恒为 0、退出码 23、文件写不出来），所以脚本里 `TMP`
+> 默认算成 Windows 路径。**Linux / macOS 上设一下 `QS_E2E_TMP` 指到
+> `/tmp/qs-e2e` 即可**（CI 里就是这么跑的，见 `.github/workflows/ci.yml`）。
+>
+> 脚本会自己起三个实例（主实例、口令实例、数据目录切换用的实例），并靠
+> `kill_port` 按端口收尾——**那个函数是跨平台写的**（Windows 走
+> `netstat -ano` + `taskkill`，Linux 走 `ss -lptn` / `lsof` + `kill`）。
+> 别把它改回只认 Windows：在 Linux 上它会静默空转，紧跟其后的收尾等待
+> 会一直等一个不存在的进程，CI 表现为**卡到 job 超时**而不是报错。
+>
+> 脚本跑之前会**挑一个二进制**，并且挑完就打印出来。这里有两个坑，都踩过：
+>
+> **一、Git Bash 会把 `./dist/quickshare` 解析成 `quickshare.exe`。** MSYS2 的
+> `test -x` / `ls` 都会按 `PATHEXT` 补后缀，而 `dist/` 里同时躺着两个 Windows
+> 产物是常态（`make build` 出 `quickshare.exe`，`make windows` 出
+> `quickshare-windows-amd64.exe`）。只要无后缀那个排在候选表前面，就会**静默
+> 选中另一个**——真出过事：只重编了 `-windows-amd64.exe`，e2e 却选了没更新的
+> `quickshare.exe`，跑出 320 项全绿，验的其实是旧二进制。所以候选表**按平台分开列**，
+> Windows 上不列无后缀候选，Linux / macOS 上不列 `.exe` 候选。
+>
+> **二、产物可能比源码旧。** 所以脚本会拿二进制的 mtime 去比 `*.go` / `*.html` /
+> `*.css` / `*.js` / `go.mod`，**只要有一个源文件更新就直接拒绝跑**（并列出是哪几个），
+> 而不是递一份假绿。确实想跑旧产物就 `QS_E2E_ALLOW_STALE=1 bash e2e.sh`。
+> 想指定别的产物用 `QS_BIN=路径`。
 
-### 发一段文本（链接、验证码、一段配置）
+### 前端验证脚本
 
-1. 点顶栏的「文本页」按钮，进 `/text`
-2. 把内容贴进输入框，点「发送」
-3. 别的设备打开同一个 `/text` 就能看到，**点整条卡片即复制**，不用去够那个小按钮
-
-要改就点卡片上的「编辑」（改完点「保存」），不要了就点「删除」。
-
-适合发那种"不想为它专门登录一次聊天软件"的东西。发过的设备会自动出现在「设备备注」里，
-可以给它起个名字（「老王的手机」），之后列表里显示的就是这个名字。
-
-### 找东西
-
-- 文件多的时候，用列表上方的**搜索框**按文件名筛（不区分大小写），右边的**排序下拉**有六种排法。
-  两个都在前端做，敲字不额外发请求；**选过的排序会记住**（只影响这台设备）
-- 文本页可以**按内容或设备名搜索**，也能按发送设备筛选
-- 文本页点「多选」进批量模式，勾几条一次删掉。**「全选」只作用于当前筛选出来的那些**
-- **别的设备传了新东西，你的列表会自己变**，不用手动点刷新
-
-### 改外观、改自动清理、改存储位置
-
-点右上角齿轮。**面板里只显示当前这页相关的设置**，外观那几项两页都有：
-
-- **外观**：浅色 / 深色 / 跟随系统，可上传背景图，并单独调背景模糊度和各面板不透明度
-- **自动清理**：文件和文本**各一档**，填「保留 N 分钟 / 小时 / 天」。**默认 0 = 永不删除**。
-  文本那侧还有一档**「验证码过期时间」**（默认 10 分钟）——整条是 4~8 位数字，或者短文里
-  带着「验证码」这类关键词和数字，就按这一档清理
-- **存储位置**：直接改数据目录，改完立即生效，可以顺手把已有文件一起迁过去
-  （用 `-data` / `QS_DATA_DIR` 指定过就锁死了，Docker 部署必然是这种情况）
-
-**单个内容的时长在列表里就地改**：点那枚时长标记（写着「还剩 3 天」或「永久保留」），
-填新的时长回车即可。填 **0 = 跟随全局设置**（**不是**"永不删除"，提示里会写出全局值是多少）。
-
-### 删东西
-
-- **文件**：列表每行右侧的「删除」，**同时清磁盘**
-- **文本**：卡片上的删除，或者进「多选」批量删
-- **设备记录**：文本页的「设备备注」面板里能删。**删设备不会删掉它发过的文本**（有意的）
+> **这些脚本不在仓库里。** 它们放在 `.tmp/shots/`，而 `.tmp/` 是 gitignore 的（见上面的数据目录），
+> 所以**文中出现的 `.tmp/shots/…` 路径都只能当开发过程的记录看**，clone 下来是找不到这些文件的。
+> 唯一随仓库发布的是端到端冒烟 `e2e.sh`，它只依赖 curl 和 Python，`bash e2e.sh` 就能跑。
+文本页也有一套（`.tmp/shots/verify-text-ui.mjs`，82 项）：搜索/设备筛选、多选删除、
+点整条复制、`/#settings` 深链、保留时长的落库与回显，以及一批"状态没清干净才会暴露"
+的细节（进多选时编辑框要收起、Escape 能退出多选、刷新后选中项与搜索条件都得留着），
+都是靠派发**真实鼠标/键盘事件**加读 DOM 来断言的。最后一节反过来验一次归一：
+绑 `127.0.0.2` 发出去，服务端看到的源地址确实变了，但设备仍该是 `localhost` 那台。
+设备身份单独有一套（`.tmp/shots/verify-device-identity.mjs`，12 项）：从 `127.0.0.1`、
+`localhost` 和**本机内网 IP** 三个**不同 origin** 各发一条文本，断言设备表里只有一台
+——这正是「新开个窗口就多出一台设备」那个 bug 的回归测试。跑之前实例要监听所有接口
+（`-addr :8099`），否则内网 IP 那段连不上、会被静默跳过。
+> **注意**：本机地址归一之后，**在一台机器上已经造不出第二台设备了**——不管绑哪个源地址
+> （`127.0.0.2` 也一样）、用哪个主机名，服务端看到的都是本机，一律归到 `localhost`。
+> 所以 `verify-text-ui.mjs` 里"多设备"的场景改成**直接写 SQLite 库造数据**
+> （`seedOtherDevice()`，设备 ID 用 RFC 5737 的文档地址 `198.51.100.x` 以免撞上真网卡），
+> 页面仍然从接口把这些行读回来。请求体里塞 `deviceId` 从改版起就不起作用了。
+> 写库不会触发 SSE（`notify` 只在接口里调），造完要手动重拉一次。
+样式一律读 `getComputedStyle`，不做像素采样——坐标差几像素就采到别处了。
+另有一个 `text-light-shot.mjs` 专门盯**两套主题的对比度**（文本页 + 设置面板，35 项）：
+按 WCAG 公式算真实对比度（半透明背景要沿祖先链复合，否则会高估），门槛取 AA 的 4.5:1。
+加新组件时最容易出的错就是"只给深色写了样式"，浅色下浅底浅字——人眼看截图很容易漏，
+算一遍就藏不住（这个检查先后抓出「已选 N 条」浅色下 2.7:1、「保留时长提示」3.1:1）。
+上面两个都是**断言**，只能证明"我想到的元素没问题"。为此还有一个 `audit-contrast.mjs`：
+它不指定元素，而是**遍历页面里所有带文字的元素**，把不达标的全扫出来。这个区别很关键——
+`--text-3` 一个变量被 15 处规则引用，靠人数不现实，扫一遍才知道全貌（首轮浅色 26 处、深色 25 处）。
+它补的是"没想到的地方"，而断言只能确认"已经想到的地方"。
+扫描逻辑抽在技能模块 `scripts/contrast-audit.mjs` 里，项目侧只留"造数据 + 切视图 + 出报告"，
+避免两份要同步的代码。评估过、有意保留的已知项按**前景色**忽略而不是按选择器——
+同一个变量造成的成片问题，逐个写正则既啰嗦，又会把新增的同类元素一起静默吞掉。
+扫出来的问题分两类，处理方式也不同：**操作按钮和输入提示读不清是功能问题**，必须修——
+深色下主按钮「发送」原本是白字压亮蓝底，只有 3.13:1，为此加了 `--on-accent` 变量让深色主题
+翻成深色字（5.66:1）；placeholder 原先用浏览器默认灰（不跟主题走，深色下反而只剩 3.13:1），
+改挂 `--text-2`（浅色 5.39、深色 6.58）；浅色的危险色 `#d64545` 在白底上 4.38:1，加深到
+`#c03333`（白底 5.19、浅红底 4.59）；「设备记录」那组说明（`#pruneHint`）也提到了 `--text-2`
+——它讲的是一个**会删数据**的开关，最后那句"只动设备记录，不删任何文本"正是用户敢不敢按下它的
+依据，按 `#ttlHintText` 的先例不能压在 3.1:1 上（同组里"读不清也不影响决定"的静态说明仍用 `.hint`）。
+而**时间戳、表头、字段标签这类次要文字**偏淡
+（`--text-3`，浅色 2.7–3.1:1）属于设计取舍：把三级灰也拉到 4.5，它会和 `--text-2` 挤在一起
+（白底 5.1 vs 6.0），三级文字的层级感基本就没了。这部分**保持现状**，
+审计脚本会一直把它们列出来，当作已知项而非待办。
+再有一个 `check-narrow.mjs`（23 项）专跑 390×844 的窄视口：`@media (max-width: 720px)` 里的规则
+（工具条换行、卡片头隐藏保留时长提示、预览层顶栏换行）在主脚本固定 1280×900 的视口下**一次都不会执行**，
+写了没跑过的 CSS 等于没写。它量的是"有没有被撑出横向滚动条"和"元素是不是还落在视口里"，
+顺带纠正了一个假设错误：当时文本页根本没有设置面板，直接 `#settingsBtn.click()` 会取到 `null`
+抛异常、整个脚本当场退出——跨页面的脚本操作元素前一律先断言存在，别把"哪个元素在哪一页"
+写进假设里（同一个元素后来也确实搬到了两页共用）。
+> 设置面板按页拆分之后它又栽了一次：量的是"保留时长的输入框有没有被压没"，
+> 结果宽 0px——**量到了被 `data-page="text"` 藏起来的那个**。改成量本页可见的
+> `#fileTtlValue` 才对，顺带把文本页那一侧和验证码那档也补上了。
+> 它还补了一条**别的脚本都发现不了**的断言：行内的设备名/时间**没有被挤成多行**
+> （390px 下"未知设备"一度变成竖排一个字一行）。这类缺陷**不产生横向溢出**，
+> 只查 `scrollWidth` 的脚本一律看不见——判据得落在"元素高度是不是异常变大"上。
+> 加预览层那次它又补了 7 条：预览层是 `position: fixed; inset: 0` 的全屏层，窄屏下文件名
+> 加五个按钮挤在一行会把整层撑宽，而**撑宽之后右上角那几个按钮会跑到视口外面，点都点不到**
+> ——所以量的是"操作列最右边还在不在视口里""关闭按钮还在不在视口里"，不只是有没有横向滚动条。
+> 顺带量了窄屏下文件名是不是独占一行（`.preview-name` 漏了 `min-width: 0` 的话省略号不生效，
+> 文件名会把按钮挤出屏幕）。
+（这类检查依赖本机装了 Chrome，不进 `e2e.sh`，避免把 curl 冒烟测试变得脆弱。）
+除上述几个，另有三个专项脚本各管一块：`verify-link-qr.mjs`（24 项：悬停出二维码、
+点复制、`navigator.clipboard` 缺失时走 `execCommand` 的降级路径、深色下二维码仍保持白底）、
+`verify-sse-ui.mjs`（8 项：远端改动自动刷新并弹提示、**本机改动不弹**）、
+`xss.mjs`（9 项：上传的 HTML 被当纯文本对待——`contentType=text/plain`、源码可见、脚本没跑，
+而带 `?dl=1` 仍是下载；带脚本的 SVG 仍能内联预览但脚本被 CSP 掐断）。
+「到底哪些扩展名能预览」另有一个 `probe-ext-mime.mjs`（11 项，**已在 `run-ui-checks.sh`
+的名单里**）：它分三节——**A** 用自己造的私有 `<input>` 量 Chrome 对 63 个扩展名报的
+`File.type`；**B** 反向验证"为什么不能拿页面上那个 `#fileInput` 量"（`app.js` 在 change
+处理器里写了 `input.value = ''`，而 `DOM.setFileInputFiles` 是**同步**触发 change 的，
+所以 CDP 调用返回时文件列表已经被清空、事后读 `files.length` 恒为 0）；**C 才是最终答案**
+——拿真实 `File` 对象走一遍 `init → 分片 → complete`，打印"Chrome 报的 / 服务端存下的 /
+preview"三列。之所以非要有 C：**客户端报什么类型服务端就存什么**，报空串才走 `mimeByExt`
+兜底，所以只看白名单、或只看 Chrome 都不够。它自带六条方向性断言（`x.png→image`、
+`x.html→text`、`x.py` 与 `x.log→text`、**`x.ts` 只能下载**、`x.mkv` 只能下载、`x.m4a→audio`），
+**全表异常时能区分"管道坏了"和"真这么设计的"**——`x.ts` 那条就是靠它逮到了"把 `.ts`
+当 TypeScript 收进文本表"这个回归。素材写在系统临时目录里（会造出 `x.go` 这种 1 字节假文件，
+放项目里会让 `gofmt -l .` 报 `expected 'package', found x`）。
+文件列表的搜索与排序另有一个 `verify-file-list.mjs`（63 项，配 `.tmp/run-file-list.sh`）：
+六种排序各验一遍顺序，加上搜索、搜索与排序叠加、`localStorage` 往返与**非法值回退**、
+自动刷新后筛选条件不被冲掉、窄视口换行、工具条两个控件的**高度**也一致（光"中心对齐"
+不够：高度差一两像素时边框会错开，看着仍然歪）、两套主题下控件跟着走。它的顺序断言刻意
+**不拿页面自己的比较器去算期望值**（那是自证），要么按我控制的名字/大小写死、要么拿
+`/api/files` 的顺序当基准；名字排序也不去跟 Node 的 ICU 对答案（两边版本不一定一致，
+会变成假红），只断言几条稳健的性质：大小写不敏感、数字按数值比、**汉字排在拉丁字母前**、
+`desc` 恰好是 `asc` 的反转。编排脚本会把 6 个文件的 `created_at` **压成同一个值**——
+不压的话"同秒那几条要翻正"这条分支一次都跑不到，脚本会静默跳过、看着全绿；压完还就地
+`SORTS['time-asc'].rev = false` 掰弯一次，确认那条反转断言**不是恒真的**。
+`verify-device-delete.mjs`（33 项：设备行显示"还有 N 条文本"与「删除设备」按钮、设置里
+「设备记录」分段控件默认停在「保留」、切成「随文本一起删除」立刻落库、
+**还有文本时设备不被清、删光才清**、面板回落成"还没有设备发过文本"、关掉开关后手动删设备
+——确认框里三句话（文本不会被删、还剩几条、是不是本机）都要对上，删完**文本一条都不少**、
+发送方回落「未知设备」）。它顺手暴露出 harness 的一个真问题：`navigate()` 只等
+`document.readyState === 'complete'`，而**旧文档本来就是 complete**，那句求值可能落在旧文档上
+立刻返回，于是"导航完成"其实还在旧页面上——紧接着点按钮就报"找不到可见元素"，看着像选择器写错。
+现在 `navigate()` 会在导航前打个标记、等标记消失才算新文档上位（技能里同步修了）。
+设置面板抽成两页共用之后又加了一个 `verify-text-settings.mjs`（38 项）：文本页顶栏的齿轮
+点开的是**本页**的面板（地址栏停在 `/text`，只有 hash 变成 `#settings`）、面板里 23 个控件
+一个不少（证明拿到的是同一套而不是另做一份简版——那条断言是"**清单里的都在**"，
+不是"面板里就这些"，漏进清单的那个正好是将来做简版时最容易被省掉的）、在本页改保留时长
+列表头那句提示立刻跟着变、切主题立刻生效、**深色下不挂背景图**（统一之前文本页是挂的，
+这条是那个分叉的回归）、点「保留 N 天」也在本页开面板，以及一次 Escape 只关一层。
+面板按页拆开之后，它多了一组**反向**断言：文本页上**看不到**文件页的块
+（上传区、文件列表、文件保留时间、文件存储位置），而主题/背景图/模糊度这类外观设置
+**两页都在**——这组断言和"清单里的都在"是一对，一个防少一个防多。
+> 改这里的文案会同时改红好几个脚本：列表头那句提示现在会带上验证码那半截
+> （`保留 3 小时（验证码 10 分钟）`），本脚本和 `probe-ttl-hint-flash.mjs` 都钉了
+> `codeTTL` 才能拿到稳定期望值。
+保留时长本身另有一个 `verify-ttl.mjs`（71 项），它是这一轮"文件也加有效期"的主验证脚本，
+五节分别盯着：**服务端三档语义**（全局、单条覆盖、验证码规则谁压过谁，以及三档各自的 0
+到底什么意思——`textTTL`/`fileTTL` 的 0 是"永不删除"，`codeTTL` 的 0 是"关掉这条规则"，
+两者不一样）、**面板按页拆分**（文件页只看得见文件那几块，文本页只看得见文本那几块，
+外观两页都有）、**三档提示文案**、**文件列表就地改单条**（单条压过全局、设回 0 又跟着全局走）、
+**文本列表**（验证码标签、`expiresAt - createdAt` 就是实际生效的秒数、编辑框里的回显、
+以及"只改保留时长不会把 `updatedAt` 刷掉、列表里不该冒出「已编辑」"）。
+它开场会自己把文件和文本清空、三档设置复位——**脚本必须能反复跑**，否则第二轮跑在上一轮
+留下的数据上，一堆计数断言会红，而红的原因和被测代码毫无关系（这个坑在
+`verify-text-ui.mjs` 上也踩过一次）。
+> 首跑红了 5 条，其中 3 条是**真缺陷**，两条里有一条特别值得记：刚把某个文件设成"1 小时"，
+> 列表上却显示"还剩 59 分钟"。到期时刻是 `created_at + ttl`，而用户是过一会儿才设的，
+> 按"够不够一个单位"去挑单位就会这样显示，看着像没设上。**单位要按四舍五入后的数值挑**。
+> 另一条是编辑器里只写"0 = 跟随全局设置"，用户点开列表上写着"还剩 1 小时"的行、看到 0，
+> 会以为读错了——现在写成"0 = 跟随全局设置（1 小时）"，把全局值直接摆出来。
+> 剩下 2 条是**断言写得太死**：拿 `JSON.stringify` 比 Go 序列化出来的 map，键序是字母序
+> 不是书写序，改成比 `10|minute` 这种拼串就稳了。
+预览功能另有一个 `verify-preview.mjs`（66 项）。它自带素材、不依赖外部编排脚本：手写 2×2
+BMP（**刻意不用 PNG**——PNG 要 zlib + CRC32 才算得出合法字节，手写一串 base64 就成了对那串
+魔数的信仰）、能真解码的 WAV（"播放中切走要静音"那条断言的**前置**：素材本身放不出来，
+那条断言就恒真了）、一个解不了码的假 mp4（验兜底文案）、一个内含 `<script>` 的 txt、
+一个超过 512 KiB 的大文本、一个 zip（**必须没有预览**）、一个 html（**文本类，会被规范化成
+`text/plain` 从而有预览**——这条曾经是反例，2026-09-19 起改成正例，顺带验了"规范化会覆盖
+客户端声明的 `text/html`"）。十一节分别盯：服务端 `preview` 字段、
+按钮有无、图片真的解码出来、环绕翻页、**播放中切走声音要停**、视频兜底、键盘翻页、
+PDF 走 iframe、文本原样不解析、只剩一条时按钮置灰、焦点在输入框时不接管按键、三种关闭
+方式、以及**文件被删后预览自动关**。
+> 它首跑红了 5 条，**全是断言写错、没有产品缺陷**，但踩的坑值得记：一是图片解码是**异步**的，
+> 插进 DOM 那一刻 `complete` 还是 `false`，不等就断言会随机红，看着像"BMP 没被浏览器认"；
+> 二是**预览层盖住视口时不能用真实点击去点下面的按钮**（命中测试落在遮罩上），得先关预览再
+> 点——这个错误的表现是"点到的还是上一个文件"，很容易误判成翻页坏了。还有一条：素材名不能
+> 有包含关系，原先叫「大日志.txt」，而搜索是**子串匹配**，搜它会把「日志.txt」一起命中，
+> "只剩一个文件"那几条断言全错。
+粘贴上传另有一个 `verify-paste.mjs`（39 项，配 `.tmp/run-paste.sh`）。它跟别的脚本不一样：
+**现编一个二进制再跑**——`app.js` 是 `go:embed` 进去的，拿 `dist/` 里现成的产物验，验的还是
+上一版代码。真正的难点是**怎么把二进制图片塞进剪贴板**：CDP 只能按键，真按 `Ctrl+V` 要动操作
+系统的剪贴板，所以改成在页面里合成 `ClipboardEvent`（先探一下这个 Chrome 认不认 init 里的
+`clipboardData`，不认就退回 `defineProperty` 造同形对象），派发的正是 `app.js` 那个监听器
+看的东西。断言围绕**改名**展开：剪贴板图片一律叫 `image.png`，不改名的话第二张会被服务端当成
+第一张的续传（同名未完成即续传），最后只剩一张——所以最要紧的一条是"一秒内连粘两张，
+得到 2 个文件（不是 1 个）"。另有一条**命名不变量**：把名字按时间戳分组，同组里的序号必须是
+1..k 一个不落、且不重复，它同时钉住"同秒不撞名"和"序号不跳号"。还有一条容易写错的：
+粘纯文字**不该**被拦（搜索框里粘一段字不能被吃掉），所以断言 `defaultPrevented === false`。
+> 首跑红 3 条，**全是断言写错、没有产品缺陷**：一是用 `/-\d+\.png$/` 去找带序号的，而这个
+> 正则把 `粘贴-20260916-205127.png` 也算进去了（`-` 后面就是 6 位数字）——**"名字长得像"
+> 的正则比写死的数字更脆**；二是原来的命名是"批量粘带 `-1`/`-2`、撞名再挂一个序号"，
+> 两套序号叠起来会出现 `粘贴-…-2-2.png`，改成**按时间戳计数**（同一秒里第几个就是几），
+> 一套序号管两件事；三是"上传队列已清空"——队列条目**传完 4 秒才移除**，断言那一刻可能还在、
+> 也可能已经没了，改成断言"没有 `.qitem.err`"（失败的上传不会自动移除，红了就一定还在）。
+还有一个 `probe-nav-flash.mjs`（6 项）量**切页时主区空白多久**。它的关键手法是
+**用 CDP 往每个请求注入延迟**（`Network.emulateNetworkConditions`）模拟 NAS + WiFi——
+本机上服务端 10ms 内就回完了，五六个请求全挤在同一帧里，"先画空壳再填内容"这个过程
+根本来不及发生，量出来甚至是负数（主内容比首帧还早）。**本地量不出来不代表没有**，
+注入 120ms 延迟之后那个 368ms 的空白才现形。它量四段：导航开始 / HTML 到手 / 首帧 /
+主区结构 / 列表填好，判据是"首帧到主区结构"这一段。顺带从 **CSSOM** 里把
+`@view-transition` 规则捞出来验（光有 CSS 文本不代表浏览器认）。
+> 自己踩的坑：重写脚本时漏了在循环里调 `setLatency`，两轮都跑在 0 延迟下，
+> 报告上却仍写着"模拟 NAS + WiFi"，数字几乎一样——看着像"注入延迟也没影响"，
+> 其实压根没注入。
+与它配套的是一个 `probe-path-row-align.mjs`（17 项）：它不截图猜、也不做像素采样，
+而是量设置面板里每行 `.path-row` 每个子元素的 `getBoundingClientRect`，断言控件的
+垂直中心与高度偏差 ≤ 0.5px、纯文字标签与控件同中线——"看着歪"这件事必须能被量化，
+否则修没修好只能靠眼睛，下次改样式又悄悄歪回去也没人知道。
+（量之前要 `sleep(400)` 等面板的入场动画跑完：`from` 帧带 `scale(.985)`，
+不等会把 30px 量成 29.5px，阈值卡紧就变成随机失败。）
+> 它因为**写死行数**红过两次，第二次是面板按页拆分之后：`.path-row` 从 3 行变成 5 行，
+> 而文本页上还只看得见其中 3 行。现在改成**先按可见性过滤、行名从 `.field-label` 现取、
+> 两页各跑一遍**，行数不再写进脚本。凡是"面板里有 N 行"这种写法都会随功能增长而失效，
+> 而且失效时报的是"期望 3 实际 5"——**看着像样式坏了，其实只是数字旧了**。
+需要外部先备好环境才能跑的脚本，前置都写在各自头部注释里，项目侧另配了**七个**编排脚本
+（外加一个只管 `dist/` 产物格式的 `checkfmt.py`）：
+`run-ui-checks.sh`（串行跑多个前端脚本，每个之前把实例重置成"干净数据目录 + 深色主题"，
+并把实例绑到所有接口以便设备身份那套能跑；起停都在同一个脚本里——Bash 调用返回时
+该次调用中用 `&` 起的子进程会被一起收掉；**按退出码判成败**，有脚本红了就以非 0 退出；
+**不带脚本名直接跑等于一条都不跑**——日志里只有两行、退出码却是 0，所以现在没给参数会
+当场报错退出）。它当前串起 15 个脚本、合计 432 项，配上 `verify-file-list`（63 项）、
+`verify-link-qr`（24 项）、`xss`（9 项），一轮完整的前端回归是 **528 项**、约四分钟）、
+`run-paste.sh`（见上，跑之前先 `go build` 一个带最新前端的二进制）、
+`run-link-qr.sh`（`verify-link-qr.mjs` 把
+文件行数写死成 3，得先走上传接口把样本文件造出来；同样每轮一个全新目录、**并把
+`node` 的退出码透出来**——原先 `node ... 2>&1` 后面又 `kill_port` 又 `echo`，
+脚本的退出码是最后一个 `echo` 的、永远是 0）、`run_xss_verify.py`
+（`xss.mjs` 要求实例**不开口令**且先传两个探针，缺了会报 `files.find is not a function`
+——**这个报错指向接口，方向完全是错的**，所以前置必须写清楚；它每轮用一个全新的临时
+数据目录，因为 safe-delete 守卫是**按轮次累计**的，固定目录反复清空迟早会被拦）、
+`run-file-list.sh`（造 6 个文件 → **压秒** → 跑 `verify-file-list.mjs`，它要求实例里
+正好 6 个文件）、`run-topbar-shot.sh`（出"两页顶栏对照图"：截两条顶栏 → 竖拼 → 在共同 x
+画一条竖线，**拼图要 Pillow，得用托管 venv 那份**，系统 python 没装）、
+`run-audit-both.sh`（对比度审计切 dark / light 各跑一遍——**自带一套配色的组件必须这么办**，
+只跑一遍等于没扫它在另一套主题下的样子）。
+**这几个编排脚本都栽过同一个跟头**：safe-delete 按轮次累计，删满 50 个文件后
+`rmtree` 被静默拒绝，实例带着上一次的数据起来——断言于是假绿或假红，而脚本毫无察觉。
+现在一律"每个脚本一个全新目录"，不需要删任何东西。
+> 还有一条：写新编排脚本之前先 `ls .tmp/*.sh .tmp/*.py`。`.tmp/` 是 gitignore 的，
+> 凭记忆写会**重复造一个早就在那儿的脚本**（`run_xss_verify.py` 就这么被重造过一次）。
 
 ---
 
@@ -964,556 +1755,6 @@ POST /api/version/check → 绕过缓存同步查一次（「检查更新」按�
 
 ---
 
-## 配置
-
-环境变量（Docker）或命令行参数（二进制）：
-
-| 环境变量 | 参数 | 默认值 | 说明 |
-|---|---|---|---|
-| `QS_ADDR` | `-addr` | `:8080` | 监听地址 |
-| `QS_DATA_DIR` | `-data` | `./data` | 数据目录。**设了就锁定设置界面里的存储位置** |
-| `QS_ADMIN_TOKEN` | — | 空 | 访问口令。留空 = 内网免鉴权 |
-| `QS_TRAY` | `-tray` | `true` | 是否显示系统托盘图标（仅 Windows 生效） |
-| `QS_CHUNK_SIZE` | — | `8388608` | 分片大小（字节），默认 8 MiB |
-| `QS_MAX_FILE_SIZE` | — | `0` | 单文件上限（字节），0 表示不限 |
-| `QS_UPLOAD_TTL_HOURS` | — | `24` | 未完成上传保留时长（小时），超时自动清理 |
-| `QS_UPDATE_CHECK` | — | `true` | 是否允许联网检查更新。**完全不出网的内网设成 `0`** |
-| `QS_UPDATE_SOURCE` | — | `github` | 问哪个源：`github` 或 `dockerhub`。**GitHub 仓库是私有的就用 `dockerhub`**（见「网页端怎么检测更新」） |
-| `QS_UPDATE_REPO` | — | 构建时注入的仓库 | 检查哪个仓库，`owner/name`，**属于 `QS_UPDATE_SOURCE` 那个源**。`github` 源下留空是回落到注入值、不是"不检查"；`dockerhub` 源下**必须显式给**，否则检查会被关掉 |
-| `QS_TRUSTED_PROXIES` | — | 空（一个都不信） | 反向代理的地址，逗号分隔的 IP 或网段（`10.0.0.5,172.16.0.0/12`）。**只有直连的对端在这个名单里**才会去读 `X-Forwarded-For`，见「[反向代理下怎么取设备身份](#反向代理下怎么取设备身份)」 |
-
-布尔型环境变量认 `1/0`、`true/false`、`yes/no`、`on/off`，写别的会打印一行提示并退回默认值。
-
-数据目录的**来源**决定它能不能在界面上改：
-
-| 来源 | 界面里 |
-|---|---|
-| `-data` 参数或 `QS_DATA_DIR` | 只读（部署方已经明确指定了） |
-| 都没有，走默认值 | 可改，改完记进系统配置目录 |
-
-优先级是：命令行参数 / 环境变量 > 系统配置目录里记的值 > 默认 `./data`。
-
----
-
-## 目录结构
-
-```
-data/
-├── quickshare.db        # SQLite：文件名、大小、上传时间、外观设置、共享文本、设备备注、
-│                        #         以及三档保留时长（全局设置 + 每条记录的单条覆盖）
-├── files/<id>           # 文件本体，文件名是随机 ID
-├── chunks/<id>/<n>      # 上传中的分片，合并完成后自动删除
-└── background           # 背景图（只有一张，未设置时不存在）
-```
-
-**文件本体不进数据库**。落盘用随机 ID 当文件名、原始文件名存库——既避免重名覆盖，也天然杜绝路径穿越。
-**共享文本相反**：它只有几 KB，直接存库，换来的是编辑、删除、排序都能用一条 SQL 表达。
-
-数据目录本身的位置记在**数据目录之外**：
-
-```
-%AppData%\quickshare\config.json      # Windows
-~/.config/quickshare/config.json      # Linux / macOS
-```
-
-原因很简单：数据目录位置是可配置的，把它存在数据目录里就成了鸡生蛋——
-下次启动得先知道数据目录在哪，才能读到"数据目录在哪"这句话。
-
----
-
-## HTTP 接口
-
-### 公开
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `GET` | `/` | 首页（主题与资源版本号已写进 HTML） |
-| `GET` | `/text` | 文本页。同样在 HTML 里注入主题与资源版本号；**没设口令时还会把输入框/列表上的 `hidden` 摘掉**，让首帧就有内容（见「关于切页观感」） |
-| `GET` | `/api/config` | 服务配置：分片大小、单文件上限、是否需要口令、**当前版本号**（构建时注入的），以及**发起本次请求的地址**（`clientIp`——设备身份就是它，页面据此在还没发过文本时也能显示「本机是哪台」；配了 `QS_TRUSTED_PROXIES` 时是转发头里解出来的那个） |
-| `GET` | `/api/settings` | 外观设置。公开，因为首帧就要套上主题 |
-| `GET` | `/api/version` | 版本与更新状态。**立刻返回缓存**，同时在后台去问配置的那个源（GitHub Releases 或 Docker Hub 的 tag 列表，见「网页端怎么检测更新」）；第一次会是 `checking: true`、`latest` 为空。`enabled` 表示"有没有配更新检查"，`latest` 为空时要靠它区分"没配"和"配了但读不到"。版本号不敏感，没设口令的部署同样该看到更新提示 |
-| `GET` | `/api/background` | 背景图。URL 带内容哈希，可长缓存 |
-| `GET` | `/f/{id}/{name}` | 下载。支持 Range；`?dl=1` 强制下载而非预览。`/f/{id}`（不带文件名）同样可用——**`{name}` 服务端根本不读**，只是让链接末尾带上真实扩展名，浏览器和用户看着清楚 |
-| `GET` | `/api/qr?d=<内容>` | 把 `d` 的内容画成二维码 PNG。内容完全由调用方给，服务端不读自己的任何数据，故不需要口令 |
-
-`/style.css`、`/app.js`、`/live.js`、`/text.js`、`/settings.js` 带 `?v=<内容哈希>` 时返回
-`Cache-Control: immutable`，不带时要求重新校验。版本号在启动时按内嵌资源内容算出，
-改前端不用手动改版本。两个页面共用同一个版本号。
-
-### 需要口令（设置 `QS_ADMIN_TOKEN` 后需带 `X-Admin-Token` 请求头）
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `POST` | `/api/upload/init` | 创建上传任务，返回 uploadId 与已收到的分片。`mime` 由客户端声明（没给就按扩展名兜底），但**文本类文件会被规范化成 `text/plain`**（见「文本类文件」一节） |
-| `PUT` | `/api/upload/{id}/{idx}` | 上传第 idx 个分片（body 为分片原始字节） |
-| `GET` | `/api/upload/{id}/status` | 查询已收到的分片，用于续传 |
-| `POST` | `/api/upload/{id}/complete` | 合并分片，生成正式文件。返回的文件对象与 `GET /api/files` 同构（含 `preview`） |
-| `DELETE` | `/api/upload/{id}` | 取消上传 |
-| `GET` | `/api/files` | 文件列表。每条带 `ttlSeconds`（单条覆盖，`0` 表示跟随全局设置）、`expiresAt`（服务端算好的到期时刻，`0` 表示不会自动删）和 `preview`（`image` / `video` / `audio` / `pdf` / `text`，**空串表示只能下载**；前端只认这个字段，不按 MIME 前缀自己猜，见「关于预览与下载」） |
-| `GET` | `/api/events` | 变更推送（SSE 长连接）。事件只有名字（`files` / `texts`），载荷固定为 `{}` |
-| `DELETE` | `/api/files/{id}` | 删除文件 |
-| `PUT` | `/api/files/{id}` | 改单个文件的保留时长：`{"ttlSeconds":7200}`。`0` 表示改回「跟随全局设置」；取值 `0..864000000`（10000 天），越界 `400`，不存在 `404` |
-| `GET` | `/api/stats` | 概览统计 |
-| `POST` | `/api/version/check` | 绕过缓存同步查一次更新（「检查更新」按钮用）。要口令：它会让服务端去访问外网，公开的话局域网里谁都能拿它烧掉 GitHub 的接口配额 |
-| `GET` | `/api/texts` | 文本列表。每条带 `deviceName`（备注优先，否则是 UA 解析出来的名字）、`isCode`（有没有被识别成验证码）、`ttlSeconds` 与 `expiresAt` |
-| `POST` | `/api/texts` | 发一条文本：`{"content":"..."}`。发送方由服务端从连接推导，请求体里的 `deviceId` **会被忽略**。内容会当场判定 `isCode` 并落库 |
-| `PUT` | `/api/texts/{id}` | 改内容或保留时长：`{"content":"..."}` 和 `{"ttlSeconds":600}`，**至少传一个**，都不传返回 `400`。内容变了会重新判定 `isCode`；不存在返回 `404` |
-| `DELETE` | `/api/texts/{id}` | 删一条文本。不存在返回 `404` |
-| `POST` | `/api/texts/delete` | 批量删：`{"ids":["..."]}`。返回 `{"ok":true,"deleted":N}`，`N` 是**实际删掉的条数**，ID 不存在不算错误。空数组或超过 1000 个 ID 返回 `400` |
-| `GET` | `/api/devices` | 设备列表（发过文本的设备）。每台带 `isMe`（是不是发起本次请求的那台）和 `textCount`（还剩几条文本） |
-| `PUT` | `/api/devices/{id}` | 改设备备注：`{"remark":"..."}`。传空串表示恢复成 UA 解析出来的名字 |
-| `DELETE` | `/api/devices/{id}` | 删设备记录（含备注）。**不碰它的文本**，那些文本还在，只是发送方回落成「未知设备」。不存在返回 `404` |
-| `PUT` | `/api/settings` | 修改外观与清理设置：`theme`、`bgBlur`、`opacity{topbar,upload,files}`、`textTTL{value,unit}`、`fileTTL{value,unit}`、`codeTTL{value,unit}`、`pruneDevices`，字段可单独传 |
-| `POST` | `/api/background` | 上传背景图（body 为图片原始字节） |
-| `DELETE` | `/api/background` | 移除背景图 |
-| `GET` | `/api/storage` | 当前数据目录、是否只读、只读原因 |
-| `PUT` | `/api/storage` | 切换数据目录：`{"path":"...","migrate":true}` |
-
-`PUT /api/settings` 里有**三档保留时长**：`textTTL`（文本）、`fileTTL`（文件）、`codeTTL`
-（文本里被识别成验证码的那些）。每档是 `{value, unit}`：`value` 取 `0..10000` 的整数，
-`unit` 只认 `"minute"` / `"hour"` / `"day"`。两个子字段可以单独传——只传 `value` 时单位保持
-原样。越界值、非法单位返回 `400`，且**校验全部通过才落库**，不会留下「值写进去了、单位被
-拒了」这种半截状态。`GET /api/settings` 会把三档都带回来，单位认不出来时回落到 `day`。
-
-**`codeTTL` 的 `0` 和另外两档不是一回事**，这是三档里最容易搞错的一处：`textTTL` / `fileTTL`
-的 `0` 是「永不自动删除」（也是默认值），而 `codeTTL` **没设过时等于默认 10 分钟，显式写 `0`
-才是「关掉这条规则」**。所以服务端要区分「键不存在」和「键存在且为 0」——混了的话，用户明明
-关掉的规则会悄悄生效，10 分钟后把刚发出去的验证码删掉，而界面上看不出任何异常。
-
-生效优先级是 **单条覆盖 > 验证码规则 > 全局设置**。单条覆盖存在每条记录自己的 `ttlSeconds`
-字段里（`0` = 跟随全局），只有文本和文件有；验证码那档只作用于文本。
-
-**解析不出来就当没设。** 值解析不了、单位认不出、值为 0 或负数，一律视为「未启用清理」。
-方向刻意保守：宁可留着让用户手动删，也不要因为一个解析不了的值把人家攒的东西清空。
-界面上的 0 也必须写成人话（「不自动删除，文本会一直留着」）——只写「0 天」会被理解成
-「立刻就删」。
-
-`PUT /api/settings` 的 `pruneDevices` 是布尔值，控制「设备随消息删除」：`true` 表示某台设备
-一条文本都不剩时连它的记录（含备注）一起删。**默认关闭**，缺省或认不出来的值一律当关闭
-——多删一次设备记录比少删一次难解释。打开的那一刻会立刻清一遍已经空掉的设备（见上方
-「关于文本发送」）。
-
-`POST /api/texts` 的设备名由服务端从请求头的 `User-Agent` 解析，不由前端传——两处各解析
-一遍迟早会不一致。设备身份则是**客户端 IP**（见上方「关于文本发送」），同样由服务端从连接
-推导，请求体里带 `deviceId` 不会被采信；从本机访问时统一记为 `localhost`。
-`GET /api/config` 会回显这个标识（`clientIp`），页面据此在还没发过文本时也能显示「本机是哪台」。
-
-`PUT /api/settings` 的请求体是增量的，只传要改的字段，比如 `{"bgBlur":12}` 或
-`{"opacity":{"files":60}}`。校验**全部通过才落库**，避免出现"主题存了、模糊度没存"
-这种半截状态。响应始终是完整的设置对象，前端拿回来直接整体套用。
-
-`PUT /api/storage` 成功时返回新目录；跨盘迁移时额外带 `leftBehind`（旧数据所在目录）。
-目录被锁定时返回 `409`，路径非法返回 `400`。切换过程中其它请求一律 `503`。
-
----
-
-## 项目结构
-
-```
-.
-├── main.go                     # 入口：配置、启动、优雅关闭、托盘接线
-├── main_test.go                # localURLOf / portOf / envBool / updateTarget 的单元测试
-├── config.go                   # 启动配置（数据目录位置），存在数据目录之外
-├── internal/
-│   ├── desktop/
-│   │   ├── desktop_windows.go  # 托盘图标 + 用默认浏览器打开链接（Win32 直调）
-│   │   ├── desktop_windows_test.go  # 内嵌图标能否转成图标句柄、托盘能否挂上
-│   │   ├── desktop_stub.go     # 非 Windows 平台的空实现
-│   │   ├── desktop_stub_test.go     # 断言非 Windows 下 Supported() 必须为 false
-│   │   │                            # （带 //go:build !windows，Windows 开发机上不编译、不执行）
-│   │   ├── gen-icon.py         # 换图标时才需要跑（纯标准库，无依赖）
-│   │   └── icon.png            # 托盘图标，go:embed 进二进制
-│   ├── store/
-│   │   ├── store.go            # SQLite 元数据层（文件、分片、设置）+ 文件名清理 + 加列迁移
-│   │   ├── store_test.go       # SanitizeName、以及「老库加新列」的迁移测试（含幂等）
-│   │   ├── texts.go            # 共享文本与设备（备注）的数据层 + 批量删除 + 按时间清理
-│   │   └── texts_test.go       # 文本 CRUD、排序稳定性、upsert 不覆盖备注、批量删除、
-│   │                           # 单条覆盖压过验证码规则与全局设置
-│   ├── version/
-│   │   ├── version.go          # 版本信息的唯一来源（四个变量由构建时注入）+ 语义化比较
-│   │   └── version_test.go     # 版本比较的单元测试（含"认不出来一律当相等"、以及三段式判断那两组）
-│   └── server/
-│       ├── server.go           # 路由、鉴权、列表接口、静态资源缓存、后端热切换、清理循环
-│       ├── events.go           # 变更推送：SSE 长连接 + 按主题分发的广播中心
-│       ├── events_test.go      # 广播中心的单元测试（含"不同主题不被合并"）
-│       ├── asset_test.go       # 资源版本号的单元测试
-│       ├── update.go           # 更新检查：查 GitHub Releases 或 Docker Hub 的 tag 列表，带缓存、永不阻塞
-│       ├── update_test.go      # 更新检查的单元测试（假 GitHub / 假 Docker Hub，逐条钉住那些取舍）
-│       ├── upload.go           # 分片上传与合并
-│       ├── download.go         # 支持 Range 的下载 + 预览白名单（inline / sandbox / attachment）、
-│       │                       # 预览归类（previewKindOf：先问白名单再分类，不另写一份清单）
-│       ├── preview_test.go     # 预览归类的契约（有归类 ⇔ 能内联、没归类 ⇒ 只能下载）
-│       ├── qr.go               # 二维码 PNG 生成（尺寸随内容模块数动态算，短链优先）
-│       ├── qr_test.go          # 二维码接口的单元测试（参数边界、可缓存、尺寸随内容增长）
-│       ├── texts.go            # 文本与设备接口、UA 解析设备名、批量删除
-│       ├── texts_test.go       # 文本接口、设备备注、主题注入、批量删除
-│       ├── proxy.go            # 设备身份：客户端 IP 的取法（含受信代理名单）、本机地址归一
-│       ├── proxy_test.go       # 受信代理名单的解析与取值规则（含"对端不受信时一个头都不读"）
-│       ├── ttl.go              # 保留时长的唯一来源：三档解析、到期时刻、验证码识别
-│       ├── ttl_test.go         # 验证码识别的边界、单位换算、优先级、到期时刻
-│       ├── settings.go         # 设置（外观 + 三档保留时长）、页面主题注入、背景图
-│       └── storage.go          # 数据目录切换与迁移
-├── web/                        # 前端（go:embed 打进二进制）
-│   ├── index.html              # 首页：上传 + 文件列表（含搜索 / 排序工具条）
-│   ├── app.js                  # 首页逻辑：上传（拖拽/点选/粘贴）、列表渲染、搜索与排序、媒体预览、复制与二维码
-│   ├── text.html               # 文本页：发送 + 工具条（搜索/筛选/多选）+ 文本列表
-│   ├── text.js                 # 文本页逻辑：列表渲染、搜索筛选、多选、复制、设备备注
-│   ├── settings.js             # 设置面板，两页共用（标记 + 事件 + 外观逻辑都在这里）
-│   ├── live.js                 # SSE 客户端，两个页面共用
-│   └── style.css               # 两个页面共用的样式与主题变量
-├── Dockerfile
-├── docker-compose.yml
-├── deploy/                     # 开机自启模板（systemd / OpenWrt procd）
-│   ├── quickshare.service      # systemd unit
-│   ├── quickshare.init         # OpenWrt 的 procd 脚本（UCI 驱动）
-│   └── quickshare.config       # OpenWrt 的 /etc/config/quickshare 样例
-├── .dockerignore               # 别把 dist/ 和 .tmp/ 塞进构建上下文
-├── .gitattributes              # 换行符统一钉成 LF（见下）
-├── LICENSE                     # MIT，与 Dockerfile 里的 OCI label 保持一致
-├── .github/workflows/
-│   ├── ci.yml                  # 每个分支与 PR：格式 + vet + 单测 + e2e + 交叉编译
-│   ├── release.yml             # 打 v* tag：编四个平台 → 发 Release
-│   └── docker.yml              # 打 v* tag：编多架构镜像 → 推 Docker Hub
-├── Makefile                    # 需要 make；Windows 上改用上面的 go 命令
-├── pack.py                     # 打包源码快照 go.zip（纯标准库，不需要 make）
-├── dist/                       # 编译产物（已 gitignore）
-└── e2e.sh                      # 端到端冒烟测试
-```
-
-> `.gitattributes` 里钉了 `* text=auto eol=lf`。这不是洁癖：Windows 上常见的
-> `core.autocrlf=true` 会在检出时把换行符换成 CRLF，而 `gofmt -l` **会把 CRLF
-> 的 Go 文件判成"没格式化"**（已实测），CI 的格式检查会红一片；`e2e.sh` /
-> `Makefile` 带 `\r` 更是直接不能用（bash 报 `$'\r': command not found`）。
-> 本地工作区刚好是 LF 时这些都看不出来，换个机器克隆下来才会炸。
-
-`go.zip` 是 `pack.py` 打出的**源码快照**（分享给别人看或编译用），属于派生产物，
-不入库、也不在上面这棵树里。要更新就重新跑一次：
-
-```bash
-python pack.py
-```
-
-**它存在的理由和「为什么不能用一条 `zip` 命令」**：早先那份快照是手写文件列表生成的，
-漏掉了全部文本功能相关文件（`texts.go` ×2、`texts_test.go` ×2、`text.html`、`text.js`、
-`live.js`）——而 `server.go` 引用了 `texts.go` 里的东西，**别人拿到那份快照根本编译不过**。
-更麻烦的是漏的都是同一块功能，看着不像"漏了"，倒像"这个项目就没有文本功能"。
-所以现在改成遍历目录，并且**打完之后会把快照解到临时目录 `go vet ./...` 跑一遍**——
-清单对不对、目录全不全，都不如让编译器说一句话。
-
----
-
-## 测试
-
-单元测试（覆盖 e2e 够不着的纯函数逻辑）：
-
-```bash
-go test ./...
-```
-
-- `internal/server/asset_test.go`：资源版本号——内容变则版本变、同内容版本稳定
-- `internal/server/qr_test.go`：二维码接口——空参数与超长参数被拒、`1024` 字节边界通过、
-  响应可长缓存、同内容出同图、不同内容出不同图、尺寸随内容增长且保持正方形
-- `internal/server/preview_test.go`：预览归类——白名单里每个类型都归得进去（含带 `charset`
-  参数、大小写、首尾空白的写法），而 HTML、JavaScript、压缩包、`application/octet-stream`、
-  Word / PowerPoint 的 MIME、空串一律归不进去。另有三条**契约断言**：**有归类 ⇒ 能内联**、
-  **没归类 ⇒ 只能下载**、SVG 归成图片但走 sandbox。它们守的是「`previewKindOf` 必须先问
-  `previewModeOf`」这件事——两份清单漂掉不会报错，只会让预览按钮点了直接下载。
-  另外三条守**上传时的文本类规范化**：`TestNormalizeUploadMime`（表里每个后缀都必须落到
-  `text/plain` 且真的可内联；不在表里的一律原样返回，一个字节都不改）、
-  `TestNormalizeUploadMimeNeverYieldsScriptable`（规范化绝不能产出可执行脚本的类型）、
-  `TestAmbiguousExtensionsStayOutOfTextExts`（`.ts` / `.sub` / `.mod` / `.bin` / `.dat` 这类
-  **同一后缀既有常见文本形态、又有常见二进制形态**的一律不许进表——`.ts` 这条是实测踩出来的）
-- `internal/server/events_test.go`：广播中心——通知能到达订阅者、注销后不再投递、
-  通知永不阻塞调用方（卡住的客户端不能拖住上传）、同一主题多次变更合并成一次、
-  **不同主题绝不被合并**（这是引入主题机制的原因本身，见上方「关于文本发送」）、
-  多订阅者扇出、并发调用不出错
-- `internal/server/texts_test.go`：文本与设备——UA 解析出设备名（含 Edge 不能被认成
-  Chrome 的顺序问题）、`deviceIDFromAddr` 从 `RemoteAddr` 取地址（含 IPv6 方括号，且把本机
-  自己的接口地址统一归到 `localhost`）、按字符边界截断、
-  文本 CRUD 与 `404` 语义、空内容/超长内容被拒、内容首尾空白不被抹掉、
-  设备按来源 IP 归并（同一 IP 发多次仍是一台）、`isMe` 只标记请求方那台、
-  设备列表带出 `textCount`（还剩几条文本）、
-  **删设备只删记录不动文本**（删完文本全在、发送方回落「未知设备」、重复删 `404`）、
-  删除开关默认关闭时文本删光也不清设备、打开后「还有文本的不清、删光了才清」且**批量删除那条路也生效**、
-  **打开开关会立刻清一遍已经空掉的设备**（只对"以后"生效的话用户会以为没生效）、
-  开关的读写往返与"只改主题不带跑开关"、
-  **改完备注再发一条备注不丢**（upsert 的 `DO UPDATE` 里顺手写 `remark` 就会踩）、
-  超长 UA 截断后仍是合法 UTF-8、变更推送 `texts` 主题且不带上 `files`、
-  两个页面都把主题与资源版本号注进了 HTML、
-  **没开口令时文本页的输入框/列表不带 `hidden`、开口令时必须带**（`servePage` 是按
-  字面量替换的，fixture 里那两行得跟 `web/text.html` 写得一模一样，否则测的是假契约）、
-  批量删除接口（含混入不存在的 ID 要返回实际条数、空数组与超量被拒）、
-  保留时长的读写与越界拦截（只改 `value` 时 `unit` 保留、非法请求不留半截状态）、
-  清理任务只删超期的文本且**未设保留时长时一条都不动**、
-  **单条覆盖压过验证码规则、验证码规则又压过全局设置**（三档优先级只有这里钉得住）
-- `internal/server/proxy_test.go`：受信代理名单——单个 IP 与网段都能解析、**单个 IP 不会被
-  当成网段**、`10.0.0.0/99` 这种写错的项跳过而不 panic（配置写错时退化成"不信任代理"，
-  比整个服务起不来好）、空配置解析出零项；
-  `realClient` 的十二种组合，**重点是"对端不在名单里时一个头都不读"**（少了这条，
-  任何人都能编一个 `X-Forwarded-For` 冒充别的设备）、**客户端伪造的左侧条目被忽略**
-  （从右往左取）、链上多个受信代理继续往左、`unknown` 这种非 IP 不采信、
-  XFF 取不到时退回 `X-Real-IP`；
-  以及接进 `clientIP` 之后的四条：默认不读转发头、受信时读、不受信时读了也没用、
-  经代理来的回环地址仍然归一成 `localhost`
-- `internal/server/ttl_test.go`：保留时长的纯逻辑——验证码识别的边界（4~8 位数字、
-  含关键词且带连续 4 位数字、`OTP 4455` 这种英文写法、只出现 `code` 而没有数字的不算、
-  超过 200 字符的长文本即使带 `code` 和数字也不算）、
-  单位换算（`minute` / `hour` / `day`、空单位用默认、认不出的算"没设"）、
-  三档从设置里解析（**`codeTTL` 没设过给 10 分钟、显式 `0` 是关掉这条规则**）、
-  以及到期时刻的优先级（单条 > 验证码 > 全局；两档都没启用时返回 `0` = 永不删除）
-- `internal/server/update_test.go`：更新检查——没配仓库时一条请求都不发、
-  **`GET /api/version` 永不阻塞**（用"卡住的假 GitHub"证明：改回同步查就会超时）、
-  比当前新才报 `hasUpdate`、同版与更旧都不报、开发版永不提示但照样带回 `latest`、
-  **仓库还没发过 release 的 `404` 不算错误**（那是正常状态，不该显示成故障）、
-  `500` 才算错误、**失败不清空上次成功的结果**（网络抖一下不该让"有新版本"凭空消失）、
-  TTL 内只查一次（5 次调用假服务端只收到 1 次请求）、`checkNow` 能绕过缓存、
-  `/api/version` 公开而 `/api/version/check` 要口令、`/api/config` 报的是注入的版本号
-  （不是写死的 `1.0.0`）
-- `internal/store/store_test.go`：文件名清理——路径穿越、非法字符、控制字符、
-  以及超长名字的截断必须落在字符边界上（按字节切会把汉字劈成半个，落库是非法 UTF-8）；
-  还有**老库加新列的迁移**：手工建一个没有新列的老结构库，`Open()` 之后老数据还在、
-  新列拿到默认值、新列可写，而且**连开同一个库三次不报 `duplicate column name`**
-  （`schema` 里全是 `CREATE TABLE IF NOT EXISTS`，对已存在的表什么都不做；
-  SQLite 又没有 `ADD COLUMN IF NOT EXISTS`，只能 `PRAGMA table_info` 逐列查）
-- `internal/store/texts_test.go`：文本数据层——CRUD、改/删不存在的记录返回 `ErrNotFound`、
-  同一秒内创建的多条排序稳定（靠 `rowid` 兜底）、
-  `ListDevices` 带出每台的 `textCount`（删掉文本后跟着变小）、
-  **`DeleteDevice` 只删设备记录、文本与它的 `device_id` 都不动**、删不存在的设备返回 `ErrNotFound`、
-  **`PruneOrphanDevices` 只清一条文本都不剩的**（还有文本的不动、没有孤儿时返回 0）、
-  `device_id` 为空串的文本不算孤儿（那是不带设备身份的旧数据）、
-  **`TouchDevice` 不覆盖已有备注**、重复设同一个备注仍算成功、备注可清空、
-  批量删除（ID 不存在不报错、跨 `deleteBatch` 分批边界仍全删）、
-  按 `created_at` 清理（**刚编辑过的旧文本照样清掉**、`before` 边界上的记录不删）
-- `internal/version/version_test.go`：版本号比较——`1.9.0 < 1.10.0`（按字符串比会得出
-  相反结论）、`v` 前缀、缺省段（`1` / `1.2`）、预发布后缀、`+build` 元数据、
-  **认不出来的版本号一律当"相等"**（`dev`、空串、`1.2.3.4`、`1.2b`、`-1.0.0`、`1..0`
-  等等，宁可不提示更新也不误报），以及比较的反对称性
-- `internal/desktop/desktop_windows_test.go`：内嵌的 `icon.png` 必须能被转成合法的图标句柄
-  （挂了不会报错，只会悄悄退回系统默认图标），以及托盘能否真的挂上去
-- `internal/desktop/desktop_stub_test.go`：非 Windows 平台必须保持空实现——
-  一旦 `Supported()` 返回 true，`main` 就会去调 `StartTray`，白白给无头服务器添乱。
-  **注意它带 `//go:build !windows`，在 Windows 开发机上不参与编译**，
-  本机跑 `go test ./...` 是看不到它的（改 stub 时要意识到这条没被验证）
-- `main_test.go`：`localURLOf`（绑定具体 IP 时**不能**退回 `localhost`，否则托盘的
-  「打开页面」连不上）、`portOf`、`envBool`（大小写、两侧空白、非法值退回默认）、
-  `updateTarget`（**"查哪个源"的决策点，出错是静默的**——源选错只会表现为"永远没有
-  新版本提示"，没有任何报错。重点是两条：`QS_UPDATE_CHECK=0` 时源和仓库配了也不检查；
-  **`dockerhub` 源没给 `QS_UPDATE_REPO` 时必须主动关掉、不能回落到注入的 GitHub 仓库名**
-  ——回落的后果是拿 GitHub 仓库名去 Docker Hub 查，必然 404 且看不出原因）
-
-端到端冒烟测试 `e2e.sh` 覆盖 324 项断言：分片上传、断点续传、分片截断拦截、分片越界拦截
-（声明 0 字节的任务不得接收任何分片）、路径穿越防护、Range 下载内容比对（sha256）、
-预览/下载两种响应头、删除、空文件、口令鉴权、外观设置与背景图（含类型白名单、大小上限、
-主题注入、静态资源缓存）、模糊度与三块不透明度的持久化与越界拦截、
-数据目录切换（迁移 / 不迁移 / 各种拒绝情形）、同一秒内上传的排序稳定性、
-二维码接口（PNG 头、`image/png`、长缓存、`d` 缺失/为空/`1024` 字节边界、同内容同图、
-不同内容不同图、开口令时仍公开）、
-列表变更推送（`text/event-stream` 头、先收到 `ready`、上传与删除各推一次、事件不带载荷、
-客户端断开后服务端照常工作、开口令时需鉴权）、
-文本发送与设备备注（文本页与首页的入口与版本号、主题注入、按 UA 解析设备名、
-文本增改删与 `404` 语义、空内容/超长内容被拒、伪造的 `deviceId` 被忽略、
-设备 ID 就是请求方 IP 且 `isMe` 标对、改备注后备注不丢、
-清空备注回到 UA 名、`texts` 主题推送且不带上 `files`）、
-文本批量删除与自动清理设置（文本页工具条/多选条/保留时间提示的存在与指向、
-批量删除返回实际条数且不因 ID 不存在而失败、空数组与超过 1000 个 ID 被拒、
-批量删除也推 `texts` 事件、保留时长默认 `0/day`、写入与读回、只改值不改单位、
-越界与非法的 `value`/`unit` 被拒且不留半截状态、改清理设置不冲掉主题、
-设了保留时长也不会在请求路径上立刻删东西）、
-切页首帧（没开口令时文本页的输入框/列表**不带** `hidden`、开口令时**必须带**、
-两个页面的空状态提示首帧都隐藏、样式表里有 `@view-transition` 且顶栏带了
-`view-transition-name`——这几条同时守着「服务端按字面量替换」那个契约）、
-删除设备记录与「设备随消息删除」（开关默认关闭、设备列表带 `textCount`、
-**打开开关后还有文本的设备不被误清**、文本删光后设备才消失、关掉后读回为关闭、
-显式 `DELETE /api/devices/{id}` 后**文本一条都不少**且发送方回落「未知设备」、重复删 `404`）、
-版本号与更新检查（`/api/version` 公开可读、**与 `/api/config` 报同一个版本号**、
-`hasUpdate` / `checking` 必须是布尔值——前端那两处判断都靠它、
-关掉更新检查后既不报错也不提示有更新、`POST /api/version/check` 受口令保护、
-**源配置怎么被解读**（独立实例，一个远端都不问）：`dockerhub` 源没给 `QS_UPDATE_REPO` 时
-必须主动关掉并在日志里说明——**绝不能回落到注入的 GitHub 仓库名**，那是另一个命名空间、
-一定查不到又看不出原因；认不出的源值回落到 `github` 并打一行警告）、
-保留时长三档（文件 / 文本 / 验证码各自默认值与读写、`minute` 是合法单位、
-**`codeTTL` 没设过回 10 分钟而显式 `0` 是关掉规则**——这两件事混了会悄悄删掉验证码、
-单条覆盖与"跟随全局"的往返、单条值越界与不存在的 ID 返回 `404`、
-**只改保留时长不刷新 `updated_at`**（否则列表上会平白多个「已编辑」）、
-两个字段都不传返回 `400`、内容改成纯数字后 `isCode` 跟着翻、
-短信里带关键词与数字也算验证码、只出现 `code` 没有连续数字的不算、
-关掉规则后验证码按全局档走、两个列表都带上 `ttlSeconds` / `expiresAt` / `isCode`、
-**设了保留时长不会在请求路径上立刻删东西**、以及两个新接口都受口令保护）、
-以及预览安全（`text/html` 与 JS 的类型都只下载、文本类文件被规范成 `text/plain` 只读不执行、
-SVG 带 sandbox CSP、应用页面 CSP、下载路径不被套上页面 CSP）、
-预览归类字段（列表里每条都带 `preview`，且取值只落在五类或空串里——将来往白名单加了类型
-却忘了归类时不会报错，只有这条能拦住）、
-反向代理下的设备身份（独立实例，配 `QS_TRUSTED_PROXIES` 跑一遍：**没配名单时伪造的
-`X-Forwarded-For` 一个字都不采信**——默认行为改坏了就是"任何人都能冒充别的设备"、
-配了之后取从右往左第一个不受信的地址、**客户端伪造的左侧条目必须被忽略**、
-链上多级代理继续往左、只有 `X-Real-IP` 时也认、两个头都没有时退回源地址、
-以及转发来的地址真的写进了设备表而不只是回显）。
-
-> 脚本开头会把 `no_proxy` 设成 `127.0.0.1,localhost,::1`。不少开发机（含这台）设了
-> `http_proxy`，curl 连本机也走代理，**端口没人监听时代理回 `502` 而不是直连该有的 `000`**，
-> 断言里看到 502 会误以为是服务端自己返的错——排查方向整个跑偏。
-
-> 第 16 节会自己起一个**不传 `-data`** 的实例，并把 `APPDATA` / `XDG_CONFIG_HOME` 指到
-> 临时目录。前者是因为只有"数据目录来自默认值或启动配置"时界面上才允许改；
-> 后者是为了不去读（也不去写）真实用户的启动配置——否则上一次跑测试留下的
-> `dataDir` 会被捡回来，结果完全不可预期。
-
-脚本自己起实例、自己收尾，跑完不留进程，也不留测试数据：
-
-```bash
-bash e2e.sh
-```
-
-想指向一个已经在跑的实例（该实例必须挂在一个空数据目录上）：
-
-```bash
-QS_BASE=http://127.0.0.1:18080 bash e2e.sh
-```
-
-> 数据目录必须是空的：第 5 节把列表条数写死了，带着历史数据跑必然误报。
-> 不传 `QS_BASE` 时脚本会自己起一个干净的，所以正常情况直接跑就行。
->
-> 注意：脚本用 `curl` 读写临时文件。Windows 的 Git Bash 里 `curl` 是
-> `C:\WINDOWS\system32\curl.exe`，不认 `/tmp` 这类 POSIX 路径（表现为
-> `size_download` 恒为 0、退出码 23、文件写不出来），所以脚本里 `TMP`
-> 默认算成 Windows 路径。**Linux / macOS 上设一下 `QS_E2E_TMP` 指到
-> `/tmp/qs-e2e` 即可**（CI 里就是这么跑的，见 `.github/workflows/ci.yml`）。
->
-> 脚本会自己起三个实例（主实例、口令实例、数据目录切换用的实例），并靠
-> `kill_port` 按端口收尾——**那个函数是跨平台写的**（Windows 走
-> `netstat -ano` + `taskkill`，Linux 走 `ss -lptn` / `lsof` + `kill`）。
-> 别把它改回只认 Windows：在 Linux 上它会静默空转，紧跟其后的收尾等待
-> 会一直等一个不存在的进程，CI 表现为**卡到 job 超时**而不是报错。
->
-> 脚本跑之前会**挑一个二进制**，并且挑完就打印出来。这里有两个坑，都踩过：
->
-> **一、Git Bash 会把 `./dist/quickshare` 解析成 `quickshare.exe`。** MSYS2 的
-> `test -x` / `ls` 都会按 `PATHEXT` 补后缀，而 `dist/` 里同时躺着两个 Windows
-> 产物是常态（`make build` 出 `quickshare.exe`，`make windows` 出
-> `quickshare-windows-amd64.exe`）。只要无后缀那个排在候选表前面，就会**静默
-> 选中另一个**——真出过事：只重编了 `-windows-amd64.exe`，e2e 却选了没更新的
-> `quickshare.exe`，跑出 320 项全绿，验的其实是旧二进制。所以候选表**按平台分开列**，
-> Windows 上不列无后缀候选，Linux / macOS 上不列 `.exe` 候选。
->
-> **二、产物可能比源码旧。** 所以脚本会拿二进制的 mtime 去比 `*.go` / `*.html` /
-> `*.css` / `*.js` / `go.mod`，**只要有一个源文件更新就直接拒绝跑**（并列出是哪几个），
-> 而不是递一份假绿。确实想跑旧产物就 `QS_E2E_ALLOW_STALE=1 bash e2e.sh`。
-> 想指定别的产物用 `QS_BIN=路径`。
-
----
-
-## 常见问题
-
-**上传大文件卡住或失败？**
-`QS_CHUNK_SIZE` 调大不一定更好，反而会放大单次失败的影响。8 MiB 对千兆内网比较平衡；机械硬盘可以调到 4 MiB。
-
-**容器启动后报 `mkdir /data/files: permission denied`？**
-
-这不是程序的问题，是挂载进来的目录属主不对。**启动日志里会直接把下面这两种解法
-打出来**，照做即可。关键点：**bind mount 会把镜像里 `/data` 的属主整个盖掉**
-（`Dockerfile` 里那句 `chown` 只在镜像层有效），容器能不能写完全看**宿主机上那个
-目录**的属主。而 OpenWrt / NAS 上新 `mkdir` 出来的目录默认是 `root:root`，容器又以
-非 root 运行（compose 默认 `1000:1000`），于是必然写不进去。
-
-先确认现状：
-
-```bash
-ls -ldn /mnt/sda1/quickshare          # 宿主机上看属主（-n 显示数字 uid）
-docker compose exec quickshare id     # 容器里实际以什么 uid 跑
-```
-
-两个数字对不上，就是问题所在。选一个解法：
-
-**OpenWrt 上最省事 —— 让容器以 root 跑。** 改 `docker-compose.yml`：
-
-```yaml
-user: "0:0"
-```
-
-内网自用场景够安全，也是 OpenWrt 上最常见的做法（OpenWrt 的用户体系本来就弱，
-`/etc/passwd` 里往往没有 uid 1000 这个用户）。
-
-**想保持非 root —— 去宿主机上把属主改成和 `user:` 一致：**
-
-```bash
-mkdir -p /mnt/sda1/quickshare
-chown -R 1000:1000 /mnt/sda1/quickshare
-chmod 755 /mnt/sda1/quickshare
-```
-
-`chown` 用数字 uid 就行，不必先在 `/etc/passwd` 里建用户。然后在 `.env` 里写
-`PUID=1000` / `PGID=1000`（群晖常见 1026，威联通常见 1000）。
-
-> 反过来也要注意：**如果之前用 root 跑过，`/data` 里的文件属主是 `root`**，
-> 现在切成非 root，容器里那个用户改不动这些文件（读还行，覆盖和删除都不行）。
-> 再 `chown -R 1000:1000` 一次即可。
-
-> 顺带一提：如果挂的是 **named volume**（`quickshare-data:/data`）而不是 bind
-> mount，Docker 首次创建卷时会把镜像里 `/data` 的内容和属主一起复制过去，
-> 就不会有这个问题——代价是文件不在你能直接翻的目录里。
-
-> **OpenWrt 上还有两个坑，和权限无关但一样致命：**
-> - **别把数据目录放在 `/tmp`** —— 那是 tmpfs，重启就没了。
-> - **别放在 `/` 下面**（比如 `/data`）—— 那在 overlay 上，空间只有你分给
->   overlay 的那点额度，传几个大文件就把系统盘撑爆，sysupgrade 的备份也会变得巨大。
->   放到真正的挂载盘上：`/mnt/sda1/quickshare` 这样。
-
-**想加访问控制？**
-最简单是在前面挂一层反向代理（Caddy / Nginx Proxy Manager）做 HTTP Basic Auth。
-如果只是想在局域网里挡一下，设 `QS_ADMIN_TOKEN` 就够了。
-
-**Windows 上没看到托盘图标？**
-多半是被收进任务栏那个 `^` 溢出区了——Windows 默认把新出现的图标藏起来。
-点开溢出区把它拖到任务栏上，之后系统会记住。
-如果连溢出区里都没有，看启动日志里有没有 `托盘图标 未启用: ...` 这一行；
-用 `-tray=false` 启动过、或者根本没有交互式桌面会话（比如跑在服务里）都会没有图标。
-
-**设置界面里的「文件存储位置」是灰的？**
-说明数据目录是启动时用 `-data` 或 `QS_DATA_DIR` 明确指定的。
-Docker 部署必然是这种状态——容器里能看到的只有映射进去的目录，
-在界面上指到别处等于写进容器可写层，容器一重建就没了。
-要换位置请改 `docker-compose.yml` 里的 `volumes` 映射，然后 `docker compose up -d`。
-
-**改了存储位置，旧目录里还有文件？**
-跨盘迁移时**不会自动删原件**（自动删是省事，但万一新盘有问题就两头空）。
-响应里会告诉你旧数据留在哪，确认新目录一切正常后自己删掉即可。
-同一个盘上切换走的是 `rename`，是整体搬走，不会留东西。
-
-**为什么有的文件没有「预览」按钮？**
-只有五类会显示：图片、音频、视频、PDF、文本（`text/*` 与 JSON）。**Word / PowerPoint
-不在里面**，原因见「[关于预览与下载](#关于预览与下载)」——浏览器原生不认这两种格式，
-而在线预览方案又要求文件能被公网访问，这是个内网服务，够不着。压缩包、可执行文件同理：
-它们没有可渲染的内容。
-
-**点了预览却说「这个格式当前浏览器放不出来」？**
-类型在服务端白名单里，**不等于你这个浏览器放得出来**：`.mov` 要看有没有装解码器、
-`.tiff` 基本没有浏览器认、`.flac` 在旧 Safari 上也不行。这时候点顶栏的「在新标签页打开」
-或「下载」——服务端按正确的内容类型发出去了，是浏览器自己解不了。
-
-**粘了张图，怎么没反应？**
-先确认剪贴板里真的是**图片文件**：有些截图工具（以及微信/QQ 的部分版本）放进剪贴板的是
-一段位图数据，浏览器这边拿不到文件，程序也就认不出来——存成文件再拖进来即可。
-另外**只有剪贴板里有文件时才会接管粘贴**，粘一段文字是原样放过去的（搜索框照常收到）。
-页面本身没有别的限制，`Ctrl+V` 在哪儿按都行。
-
-**能装在 OpenWrt 路由器上吗？**
-看架构。**ARM（armv7 / arm64）和 x86 的可以，MIPS 的不行。**
-
-MIPS 不是没编，是**编不出来**：SQLite 用的是纯 Go 实现（`modernc.org/sqlite`），它依赖的
-`modernc.org/libc` 没有 mips / mipsle 的移植，`mips64le` 那部分也是坏的（实测三种都失败）。
-**ramips、ath79 那一大批路由器因此直接出局**。先 `uname -m` 看一眼，或者查一下你的机型是
-哪个 target；`aarch64_*` / `arm_*` / `x86_64` 都能跑，`riscv64` 也试过可以。
-
-跑得起来的话，用 `deploy/` 里那套（scp 二进制 + procd 脚本）就够了，**不需要做 ipk / apk 包**：
-Go 静态二进制跟内核版本无关（22.03 是 5.10、24.10 是 6.6、25.12 是 6.12，卡这个的是 kmod），
-而包格式反而分了两代——**25.12 起换成了 apk，24.10 及以前是 opkg**，做包得每个发行版一份
-SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`"。
-
-> 另外留意体积和内存：产物 11 MB，而不少路由器整个 flash 才 16–32 MB；纯 Go 的 SQLite
-> 也比 C 版吃内存，64 MB 的老机器会比较勉强。
-
----
-
 ## 技术选型说明
 
 - **Go**：编译成单个静态二进制，内存占用 10–30 MB，`CGO_ENABLED=0` 可任意交叉编译到 NAS 架构。
@@ -1548,207 +1789,6 @@ SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`
   涉及交互和配色时，用 CDP 连上无头 Chrome，固定视口后执行 JS 读 `getComputedStyle` / `document.title`。
   预览安全的修复就是靠它在真实浏览器里确认：上传的 HTML **被当纯文本对待**（`document.contentType`
   是 `text/plain`，脚本读不到 localStorage）、SVG 里的脚本没有执行。
-  > **这些脚本不在仓库里。** 它们放在 `.tmp/shots/`，而 `.tmp/` 是 gitignore 的（见上面的目录结构），
-  > 所以**文中出现的 `.tmp/shots/…` 路径都只能当开发过程的记录看**，clone 下来是找不到这些文件的。
-  > 唯一随仓库发布的是端到端冒烟 `e2e.sh`，它只依赖 curl 和 Python，`bash e2e.sh` 就能跑。
-  文本页也有一套（`.tmp/shots/verify-text-ui.mjs`，82 项）：搜索/设备筛选、多选删除、
-  点整条复制、`/#settings` 深链、保留时长的落库与回显，以及一批"状态没清干净才会暴露"
-  的细节（进多选时编辑框要收起、Escape 能退出多选、刷新后选中项与搜索条件都得留着），
-  都是靠派发**真实鼠标/键盘事件**加读 DOM 来断言的。最后一节反过来验一次归一：
-  绑 `127.0.0.2` 发出去，服务端看到的源地址确实变了，但设备仍该是 `localhost` 那台。
-  设备身份单独有一套（`.tmp/shots/verify-device-identity.mjs`，12 项）：从 `127.0.0.1`、
-  `localhost` 和**本机内网 IP** 三个**不同 origin** 各发一条文本，断言设备表里只有一台
-  ——这正是「新开个窗口就多出一台设备」那个 bug 的回归测试。跑之前实例要监听所有接口
-  （`-addr :8099`），否则内网 IP 那段连不上、会被静默跳过。
-  > **注意**：本机地址归一之后，**在一台机器上已经造不出第二台设备了**——不管绑哪个源地址
-  > （`127.0.0.2` 也一样）、用哪个主机名，服务端看到的都是本机，一律归到 `localhost`。
-  > 所以 `verify-text-ui.mjs` 里"多设备"的场景改成**直接写 SQLite 库造数据**
-  > （`seedOtherDevice()`，设备 ID 用 RFC 5737 的文档地址 `198.51.100.x` 以免撞上真网卡），
-  > 页面仍然从接口把这些行读回来。请求体里塞 `deviceId` 从改版起就不起作用了。
-  > 写库不会触发 SSE（`notify` 只在接口里调），造完要手动重拉一次。
-  样式一律读 `getComputedStyle`，不做像素采样——坐标差几像素就采到别处了。
-  另有一个 `text-light-shot.mjs` 专门盯**两套主题的对比度**（文本页 + 设置面板，35 项）：
-  按 WCAG 公式算真实对比度（半透明背景要沿祖先链复合，否则会高估），门槛取 AA 的 4.5:1。
-  加新组件时最容易出的错就是"只给深色写了样式"，浅色下浅底浅字——人眼看截图很容易漏，
-  算一遍就藏不住（这个检查先后抓出「已选 N 条」浅色下 2.7:1、「保留时长提示」3.1:1）。
-  上面两个都是**断言**，只能证明"我想到的元素没问题"。为此还有一个 `audit-contrast.mjs`：
-  它不指定元素，而是**遍历页面里所有带文字的元素**，把不达标的全扫出来。这个区别很关键——
-  `--text-3` 一个变量被 15 处规则引用，靠人数不现实，扫一遍才知道全貌（首轮浅色 26 处、深色 25 处）。
-  它补的是"没想到的地方"，而断言只能确认"已经想到的地方"。
-  扫描逻辑抽在技能模块 `scripts/contrast-audit.mjs` 里，项目侧只留"造数据 + 切视图 + 出报告"，
-  避免两份要同步的代码。评估过、有意保留的已知项按**前景色**忽略而不是按选择器——
-  同一个变量造成的成片问题，逐个写正则既啰嗦，又会把新增的同类元素一起静默吞掉。
-  扫出来的问题分两类，处理方式也不同：**操作按钮和输入提示读不清是功能问题**，必须修——
-  深色下主按钮「发送」原本是白字压亮蓝底，只有 3.13:1，为此加了 `--on-accent` 变量让深色主题
-  翻成深色字（5.66:1）；placeholder 原先用浏览器默认灰（不跟主题走，深色下反而只剩 3.13:1），
-  改挂 `--text-2`（浅色 5.39、深色 6.58）；浅色的危险色 `#d64545` 在白底上 4.38:1，加深到
-  `#c03333`（白底 5.19、浅红底 4.59）；「设备记录」那组说明（`#pruneHint`）也提到了 `--text-2`
-  ——它讲的是一个**会删数据**的开关，最后那句"只动设备记录，不删任何文本"正是用户敢不敢按下它的
-  依据，按 `#ttlHintText` 的先例不能压在 3.1:1 上（同组里"读不清也不影响决定"的静态说明仍用 `.hint`）。
-  而**时间戳、表头、字段标签这类次要文字**偏淡
-  （`--text-3`，浅色 2.7–3.1:1）属于设计取舍：把三级灰也拉到 4.5，它会和 `--text-2` 挤在一起
-  （白底 5.1 vs 6.0），三级文字的层级感基本就没了。这部分**保持现状**，
-  审计脚本会一直把它们列出来，当作已知项而非待办。
-  再有一个 `check-narrow.mjs`（23 项）专跑 390×844 的窄视口：`@media (max-width: 720px)` 里的规则
-  （工具条换行、卡片头隐藏保留时长提示、预览层顶栏换行）在主脚本固定 1280×900 的视口下**一次都不会执行**，
-  写了没跑过的 CSS 等于没写。它量的是"有没有被撑出横向滚动条"和"元素是不是还落在视口里"，
-  顺带纠正了一个假设错误：当时文本页根本没有设置面板，直接 `#settingsBtn.click()` 会取到 `null`
-  抛异常、整个脚本当场退出——跨页面的脚本操作元素前一律先断言存在，别把"哪个元素在哪一页"
-  写进假设里（同一个元素后来也确实搬到了两页共用）。
-  > 设置面板按页拆分之后它又栽了一次：量的是"保留时长的输入框有没有被压没"，
-  > 结果宽 0px——**量到了被 `data-page="text"` 藏起来的那个**。改成量本页可见的
-  > `#fileTtlValue` 才对，顺带把文本页那一侧和验证码那档也补上了。
-  > 它还补了一条**别的脚本都发现不了**的断言：行内的设备名/时间**没有被挤成多行**
-  > （390px 下"未知设备"一度变成竖排一个字一行）。这类缺陷**不产生横向溢出**，
-  > 只查 `scrollWidth` 的脚本一律看不见——判据得落在"元素高度是不是异常变大"上。
-  > 加预览层那次它又补了 7 条：预览层是 `position: fixed; inset: 0` 的全屏层，窄屏下文件名
-  > 加五个按钮挤在一行会把整层撑宽，而**撑宽之后右上角那几个按钮会跑到视口外面，点都点不到**
-  > ——所以量的是"操作列最右边还在不在视口里""关闭按钮还在不在视口里"，不只是有没有横向滚动条。
-  > 顺带量了窄屏下文件名是不是独占一行（`.preview-name` 漏了 `min-width: 0` 的话省略号不生效，
-  > 文件名会把按钮挤出屏幕）。
-  （这类检查依赖本机装了 Chrome，不进 `e2e.sh`，避免把 curl 冒烟测试变得脆弱。）
-  除上述几个，另有三个专项脚本各管一块：`verify-link-qr.mjs`（24 项：悬停出二维码、
-  点复制、`navigator.clipboard` 缺失时走 `execCommand` 的降级路径、深色下二维码仍保持白底）、
-  `verify-sse-ui.mjs`（8 项：远端改动自动刷新并弹提示、**本机改动不弹**）、
-  `xss.mjs`（9 项：上传的 HTML 被当纯文本对待——`contentType=text/plain`、源码可见、脚本没跑，
-  而带 `?dl=1` 仍是下载；带脚本的 SVG 仍能内联预览但脚本被 CSP 掐断）。
-  「到底哪些扩展名能预览」另有一个 `probe-ext-mime.mjs`（11 项，**已在 `run-ui-checks.sh`
-  的名单里**）：它分三节——**A** 用自己造的私有 `<input>` 量 Chrome 对 63 个扩展名报的
-  `File.type`；**B** 反向验证"为什么不能拿页面上那个 `#fileInput` 量"（`app.js` 在 change
-  处理器里写了 `input.value = ''`，而 `DOM.setFileInputFiles` 是**同步**触发 change 的，
-  所以 CDP 调用返回时文件列表已经被清空、事后读 `files.length` 恒为 0）；**C 才是最终答案**
-  ——拿真实 `File` 对象走一遍 `init → 分片 → complete`，打印"Chrome 报的 / 服务端存下的 /
-  preview"三列。之所以非要有 C：**客户端报什么类型服务端就存什么**，报空串才走 `mimeByExt`
-  兜底，所以只看白名单、或只看 Chrome 都不够。它自带六条方向性断言（`x.png→image`、
-  `x.html→text`、`x.py` 与 `x.log→text`、**`x.ts` 只能下载**、`x.mkv` 只能下载、`x.m4a→audio`），
-  **全表异常时能区分"管道坏了"和"真这么设计的"**——`x.ts` 那条就是靠它逮到了"把 `.ts`
-  当 TypeScript 收进文本表"这个回归。素材写在系统临时目录里（会造出 `x.go` 这种 1 字节假文件，
-  放项目里会让 `gofmt -l .` 报 `expected 'package', found x`）。
-  文件列表的搜索与排序另有一个 `verify-file-list.mjs`（63 项，配 `.tmp/run-file-list.sh`）：
-  六种排序各验一遍顺序，加上搜索、搜索与排序叠加、`localStorage` 往返与**非法值回退**、
-  自动刷新后筛选条件不被冲掉、窄视口换行、工具条两个控件的**高度**也一致（光"中心对齐"
-  不够：高度差一两像素时边框会错开，看着仍然歪）、两套主题下控件跟着走。它的顺序断言刻意
-  **不拿页面自己的比较器去算期望值**（那是自证），要么按我控制的名字/大小写死、要么拿
-  `/api/files` 的顺序当基准；名字排序也不去跟 Node 的 ICU 对答案（两边版本不一定一致，
-  会变成假红），只断言几条稳健的性质：大小写不敏感、数字按数值比、**汉字排在拉丁字母前**、
-  `desc` 恰好是 `asc` 的反转。编排脚本会把 6 个文件的 `created_at` **压成同一个值**——
-  不压的话"同秒那几条要翻正"这条分支一次都跑不到，脚本会静默跳过、看着全绿；压完还就地
-  `SORTS['time-asc'].rev = false` 掰弯一次，确认那条反转断言**不是恒真的**。
-  `verify-device-delete.mjs`（33 项：设备行显示"还有 N 条文本"与「删除设备」按钮、设置里
-  「设备记录」分段控件默认停在「保留」、切成「随文本一起删除」立刻落库、
-  **还有文本时设备不被清、删光才清**、面板回落成"还没有设备发过文本"、关掉开关后手动删设备
-  ——确认框里三句话（文本不会被删、还剩几条、是不是本机）都要对上，删完**文本一条都不少**、
-  发送方回落「未知设备」）。它顺手暴露出 harness 的一个真问题：`navigate()` 只等
-  `document.readyState === 'complete'`，而**旧文档本来就是 complete**，那句求值可能落在旧文档上
-  立刻返回，于是"导航完成"其实还在旧页面上——紧接着点按钮就报"找不到可见元素"，看着像选择器写错。
-  现在 `navigate()` 会在导航前打个标记、等标记消失才算新文档上位（技能里同步修了）。
-  设置面板抽成两页共用之后又加了一个 `verify-text-settings.mjs`（38 项）：文本页顶栏的齿轮
-  点开的是**本页**的面板（地址栏停在 `/text`，只有 hash 变成 `#settings`）、面板里 23 个控件
-  一个不少（证明拿到的是同一套而不是另做一份简版——那条断言是"**清单里的都在**"，
-  不是"面板里就这些"，漏进清单的那个正好是将来做简版时最容易被省掉的）、在本页改保留时长
-  列表头那句提示立刻跟着变、切主题立刻生效、**深色下不挂背景图**（统一之前文本页是挂的，
-  这条是那个分叉的回归）、点「保留 N 天」也在本页开面板，以及一次 Escape 只关一层。
-  面板按页拆开之后，它多了一组**反向**断言：文本页上**看不到**文件页的块
-  （上传区、文件列表、文件保留时间、文件存储位置），而主题/背景图/模糊度这类外观设置
-  **两页都在**——这组断言和"清单里的都在"是一对，一个防少一个防多。
-  > 改这里的文案会同时改红好几个脚本：列表头那句提示现在会带上验证码那半截
-  > （`保留 3 小时（验证码 10 分钟）`），本脚本和 `probe-ttl-hint-flash.mjs` 都钉了
-  > `codeTTL` 才能拿到稳定期望值。
-  保留时长本身另有一个 `verify-ttl.mjs`（71 项），它是这一轮"文件也加有效期"的主验证脚本，
-  五节分别盯着：**服务端三档语义**（全局、单条覆盖、验证码规则谁压过谁，以及三档各自的 0
-  到底什么意思——`textTTL`/`fileTTL` 的 0 是"永不删除"，`codeTTL` 的 0 是"关掉这条规则"，
-  两者不一样）、**面板按页拆分**（文件页只看得见文件那几块，文本页只看得见文本那几块，
-  外观两页都有）、**三档提示文案**、**文件列表就地改单条**（单条压过全局、设回 0 又跟着全局走）、
-  **文本列表**（验证码标签、`expiresAt - createdAt` 就是实际生效的秒数、编辑框里的回显、
-  以及"只改保留时长不会把 `updatedAt` 刷掉、列表里不该冒出「已编辑」"）。
-  它开场会自己把文件和文本清空、三档设置复位——**脚本必须能反复跑**，否则第二轮跑在上一轮
-  留下的数据上，一堆计数断言会红，而红的原因和被测代码毫无关系（这个坑在
-  `verify-text-ui.mjs` 上也踩过一次）。
-  > 首跑红了 5 条，其中 3 条是**真缺陷**，两条里有一条特别值得记：刚把某个文件设成"1 小时"，
-  > 列表上却显示"还剩 59 分钟"。到期时刻是 `created_at + ttl`，而用户是过一会儿才设的，
-  > 按"够不够一个单位"去挑单位就会这样显示，看着像没设上。**单位要按四舍五入后的数值挑**。
-  > 另一条是编辑器里只写"0 = 跟随全局设置"，用户点开列表上写着"还剩 1 小时"的行、看到 0，
-  > 会以为读错了——现在写成"0 = 跟随全局设置（1 小时）"，把全局值直接摆出来。
-  > 剩下 2 条是**断言写得太死**：拿 `JSON.stringify` 比 Go 序列化出来的 map，键序是字母序
-  > 不是书写序，改成比 `10|minute` 这种拼串就稳了。
-  预览功能另有一个 `verify-preview.mjs`（66 项）。它自带素材、不依赖外部编排脚本：手写 2×2
-  BMP（**刻意不用 PNG**——PNG 要 zlib + CRC32 才算得出合法字节，手写一串 base64 就成了对那串
-  魔数的信仰）、能真解码的 WAV（"播放中切走要静音"那条断言的**前置**：素材本身放不出来，
-  那条断言就恒真了）、一个解不了码的假 mp4（验兜底文案）、一个内含 `<script>` 的 txt、
-  一个超过 512 KiB 的大文本、一个 zip（**必须没有预览**）、一个 html（**文本类，会被规范化成
-  `text/plain` 从而有预览**——这条曾经是反例，2026-09-19 起改成正例，顺带验了"规范化会覆盖
-  客户端声明的 `text/html`"）。十一节分别盯：服务端 `preview` 字段、
-  按钮有无、图片真的解码出来、环绕翻页、**播放中切走声音要停**、视频兜底、键盘翻页、
-  PDF 走 iframe、文本原样不解析、只剩一条时按钮置灰、焦点在输入框时不接管按键、三种关闭
-  方式、以及**文件被删后预览自动关**。
-  > 它首跑红了 5 条，**全是断言写错、没有产品缺陷**，但踩的坑值得记：一是图片解码是**异步**的，
-  > 插进 DOM 那一刻 `complete` 还是 `false`，不等就断言会随机红，看着像"BMP 没被浏览器认"；
-  > 二是**预览层盖住视口时不能用真实点击去点下面的按钮**（命中测试落在遮罩上），得先关预览再
-  > 点——这个错误的表现是"点到的还是上一个文件"，很容易误判成翻页坏了。还有一条：素材名不能
-  > 有包含关系，原先叫「大日志.txt」，而搜索是**子串匹配**，搜它会把「日志.txt」一起命中，
-  > "只剩一个文件"那几条断言全错。
-  粘贴上传另有一个 `verify-paste.mjs`（39 项，配 `.tmp/run-paste.sh`）。它跟别的脚本不一样：
-  **现编一个二进制再跑**——`app.js` 是 `go:embed` 进去的，拿 `dist/` 里现成的产物验，验的还是
-  上一版代码。真正的难点是**怎么把二进制图片塞进剪贴板**：CDP 只能按键，真按 `Ctrl+V` 要动操作
-  系统的剪贴板，所以改成在页面里合成 `ClipboardEvent`（先探一下这个 Chrome 认不认 init 里的
-  `clipboardData`，不认就退回 `defineProperty` 造同形对象），派发的正是 `app.js` 那个监听器
-  看的东西。断言围绕**改名**展开：剪贴板图片一律叫 `image.png`，不改名的话第二张会被服务端当成
-  第一张的续传（同名未完成即续传），最后只剩一张——所以最要紧的一条是"一秒内连粘两张，
-  得到 2 个文件（不是 1 个）"。另有一条**命名不变量**：把名字按时间戳分组，同组里的序号必须是
-  1..k 一个不落、且不重复，它同时钉住"同秒不撞名"和"序号不跳号"。还有一条容易写错的：
-  粘纯文字**不该**被拦（搜索框里粘一段字不能被吃掉），所以断言 `defaultPrevented === false`。
-  > 首跑红 3 条，**全是断言写错、没有产品缺陷**：一是用 `/-\d+\.png$/` 去找带序号的，而这个
-  > 正则把 `粘贴-20260916-205127.png` 也算进去了（`-` 后面就是 6 位数字）——**"名字长得像"
-  > 的正则比写死的数字更脆**；二是原来的命名是"批量粘带 `-1`/`-2`、撞名再挂一个序号"，
-  > 两套序号叠起来会出现 `粘贴-…-2-2.png`，改成**按时间戳计数**（同一秒里第几个就是几），
-  > 一套序号管两件事；三是"上传队列已清空"——队列条目**传完 4 秒才移除**，断言那一刻可能还在、
-  > 也可能已经没了，改成断言"没有 `.qitem.err`"（失败的上传不会自动移除，红了就一定还在）。
-  还有一个 `probe-nav-flash.mjs`（6 项）量**切页时主区空白多久**。它的关键手法是
-  **用 CDP 往每个请求注入延迟**（`Network.emulateNetworkConditions`）模拟 NAS + WiFi——
-  本机上服务端 10ms 内就回完了，五六个请求全挤在同一帧里，"先画空壳再填内容"这个过程
-  根本来不及发生，量出来甚至是负数（主内容比首帧还早）。**本地量不出来不代表没有**，
-  注入 120ms 延迟之后那个 368ms 的空白才现形。它量四段：导航开始 / HTML 到手 / 首帧 /
-  主区结构 / 列表填好，判据是"首帧到主区结构"这一段。顺带从 **CSSOM** 里把
-  `@view-transition` 规则捞出来验（光有 CSS 文本不代表浏览器认）。
-  > 自己踩的坑：重写脚本时漏了在循环里调 `setLatency`，两轮都跑在 0 延迟下，
-  > 报告上却仍写着"模拟 NAS + WiFi"，数字几乎一样——看着像"注入延迟也没影响"，
-  > 其实压根没注入。
-  与它配套的是一个 `probe-path-row-align.mjs`（17 项）：它不截图猜、也不做像素采样，
-  而是量设置面板里每行 `.path-row` 每个子元素的 `getBoundingClientRect`，断言控件的
-  垂直中心与高度偏差 ≤ 0.5px、纯文字标签与控件同中线——"看着歪"这件事必须能被量化，
-  否则修没修好只能靠眼睛，下次改样式又悄悄歪回去也没人知道。
-  （量之前要 `sleep(400)` 等面板的入场动画跑完：`from` 帧带 `scale(.985)`，
-  不等会把 30px 量成 29.5px，阈值卡紧就变成随机失败。）
-  > 它因为**写死行数**红过两次，第二次是面板按页拆分之后：`.path-row` 从 3 行变成 5 行，
-  > 而文本页上还只看得见其中 3 行。现在改成**先按可见性过滤、行名从 `.field-label` 现取、
-  > 两页各跑一遍**，行数不再写进脚本。凡是"面板里有 N 行"这种写法都会随功能增长而失效，
-  > 而且失效时报的是"期望 3 实际 5"——**看着像样式坏了，其实只是数字旧了**。
-  需要外部先备好环境才能跑的脚本，前置都写在各自头部注释里，项目侧另配了**七个**编排脚本
-  （外加一个只管 `dist/` 产物格式的 `checkfmt.py`）：
-  `run-ui-checks.sh`（串行跑多个前端脚本，每个之前把实例重置成"干净数据目录 + 深色主题"，
-  并把实例绑到所有接口以便设备身份那套能跑；起停都在同一个脚本里——Bash 调用返回时
-  该次调用中用 `&` 起的子进程会被一起收掉；**按退出码判成败**，有脚本红了就以非 0 退出；
-  **不带脚本名直接跑等于一条都不跑**——日志里只有两行、退出码却是 0，所以现在没给参数会
-  当场报错退出）。它当前串起 15 个脚本、合计 432 项，配上 `verify-file-list`（63 项）、
-  `verify-link-qr`（24 项）、`xss`（9 项），一轮完整的前端回归是 **528 项**、约四分钟）、
-  `run-paste.sh`（见上，跑之前先 `go build` 一个带最新前端的二进制）、
-  `run-link-qr.sh`（`verify-link-qr.mjs` 把
-  文件行数写死成 3，得先走上传接口把样本文件造出来；同样每轮一个全新目录、**并把
-  `node` 的退出码透出来**——原先 `node ... 2>&1` 后面又 `kill_port` 又 `echo`，
-  脚本的退出码是最后一个 `echo` 的、永远是 0）、`run_xss_verify.py`
-  （`xss.mjs` 要求实例**不开口令**且先传两个探针，缺了会报 `files.find is not a function`
-  ——**这个报错指向接口，方向完全是错的**，所以前置必须写清楚；它每轮用一个全新的临时
-  数据目录，因为 safe-delete 守卫是**按轮次累计**的，固定目录反复清空迟早会被拦）、
-  `run-file-list.sh`（造 6 个文件 → **压秒** → 跑 `verify-file-list.mjs`，它要求实例里
-  正好 6 个文件）、`run-topbar-shot.sh`（出"两页顶栏对照图"：截两条顶栏 → 竖拼 → 在共同 x
-  画一条竖线，**拼图要 Pillow，得用托管 venv 那份**，系统 python 没装）、
-  `run-audit-both.sh`（对比度审计切 dark / light 各跑一遍——**自带一套配色的组件必须这么办**，
-  只跑一遍等于没扫它在另一套主题下的样子）。
-  **这几个编排脚本都栽过同一个跟头**：safe-delete 按轮次累计，删满 50 个文件后
-  `rmtree` 被静默拒绝，实例带着上一次的数据起来——断言于是假绿或假红，而脚本毫无察觉。
-  现在一律"每个脚本一个全新目录"，不需要删任何东西。
-  > 还有一条：写新编排脚本之前先 `ls .tmp/*.sh .tmp/*.py`。`.tmp/` 是 gitignore 的，
-  > 凭记忆写会**重复造一个早就在那儿的脚本**（`run_xss_verify.py` 就这么被重造过一次）。
 - **托盘直接调 Win32，不引第三方 GUI 库**：`golang.org/x/sys/windows` 本来就在依赖树里
   （modernc.org/sqlite 带进来的），直接用它调 `Shell_NotifyIcon` / `TrackPopupMenu`，
   省掉一个依赖，也省掉"这个库在 Linux 上要不要拖 gtk"这类问题。用 build tag 把实现挡在
@@ -1759,13 +1799,15 @@ SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`
   请求会莫名其妙地读到旧数据。切换期间另有一个 `switching` 标志把请求挡成 503，
   避免请求落进"库已经关了、新库还没开"的窗口里。
 
+---
+
 ## 许可证
 
 [MIT](LICENSE)。`Dockerfile` 里那个 OCI label（`org.opencontainers.image.licenses`）标的
 是同一个协议，**改协议时两边要一起改**——label 是给镜像仓库和扫描工具看的，LICENSE 是给
 人看的，写着不一样比不写更糟。
 
-### 关于代码来源
+### 代码来源
 
 **本项目的代码由 AI 生成**，需求、取舍与验收由人把关。这带来两件得说清楚的事：
 
@@ -1776,4 +1818,3 @@ SDK、还得维护两套格式，换来的只是"能进 feed、能 `apk upgrade`
   [Issue](../../issues) 说明具体位置，我会立刻删除或改写。
 
 协议本身仍按上面的 MIT 走。
-
