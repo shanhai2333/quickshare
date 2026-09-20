@@ -1337,8 +1337,8 @@ QS_BASE=http://127.0.0.1:18080 bash e2e.sh
 （外加一个只管 `dist/` 产物格式的 `checkfmt.py`）。**每个脚本各用一个全新的临时数据目录**
 ——safe-delete 守卫是按轮次累计的，固定目录反复清空迟早会被拦。
 
-`run-ui-checks.sh` 当前串起 15 个脚本、合计 432 项，配上 `verify-file-list`（63 项）、
-`verify-link-qr`（24 项）、`xss`（9 项），一轮完整的前端回归是 **528 项**、约四分钟。
+`run-ui-checks.sh` 当前串起 15 个脚本、合计 434 项，配上 `verify-file-list`（63 项）、
+`verify-link-qr`（24 项）、`xss`（9 项），一轮完整的前端回归是 **530 项**、约四分钟。
 这类检查依赖本机装了 Chrome，不进 `e2e.sh`，避免把 curl 冒烟测试变得脆弱。
 
 ---
