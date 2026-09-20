@@ -1267,7 +1267,10 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
    视口只有 320~412px，.card 又是 overflow: hidden —— 于是右边被裁掉，看起来就是
    「按钮显示不全」。让操作列折到第二行，文件名才能拿到整行宽度。
    分界点取 560：表格 416 + .wrap 左右 16 + 卡片边框 2 = 450px 才放得下，
-   往上留一档余量，免得正好卡在临界值上来回跳。 */
+   往上留一档余量，免得正好卡在临界值上来回跳。
+   代价是**表格的语义（行列关联、表头）在这一档下一起没了**——`.col-hide-sm` 已经让列
+   对不齐，手机上也没有可用的横向表头，拿它换「四个按钮都点得到」是值的。往后要加
+   依赖 `<th>` 的东西（排序指示器之类）得先想到这一点。 */
 @media (max-width: 560px) {
   thead { display: none; }
   table, tbody, tr, td { display: block; width: auto; }
