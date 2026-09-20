@@ -1235,6 +1235,18 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
   ::view-transition-new(*) { animation: none !important; }
 }
 
+/* 721~880px 这一段四列全在，但表格的 min-content 放不下：
+   文件名列最多 444（.fname 封顶 420 + td 左右各 12）+ 大小 68 + 上传时间 90 +
+   操作列 192 ≈ 794px，而这一段能拿到的宽度只有 671~830px。
+   右边被 .card 的 overflow:hidden 裁掉，同样是「按钮显示不全」。
+   （文件名列那一项要文件名叫得够长才顶到 420；短名字这一列会自己缩下去，
+   所以这处裁切平时不一定露出来，别因为「我这台机器上是好的」就把它删了。）
+   把封顶值收一收，让文件名先让步 —— 881px 往上（卡片 ≥831px）就够宽了，回到 420。
+   单独写成一条带而不是改基准值：桌面端的观感一个像素都不动。 */
+@media (min-width: 721px) and (max-width: 880px) {
+  .fname { max-width: 280px; }
+}
+
 @media (max-width: 720px) {
   .wrap { padding: 16px; }
   .stats { display: none; }
@@ -1247,4 +1259,21 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
   .toolbar select { flex: 1; max-width: none; }
   /* 头部本来就挤（标题 + 计数 + 两个按钮），保留提示让位 */
   .card-head .ttl-hint { display: none; }
+}
+
+/* 再窄一点（手机竖屏）整行改成上下两块：第一行文件名，第二行操作按钮。
+   「文件名」列最少 224px（.fname 的 max-width 200 + td 左右各 12），操作列最少
+   192px（四个按钮并排 168 + 左右各 12），表格的 min-content 就是 416px；而手机
+   视口只有 320~412px，.card 又是 overflow: hidden —— 于是右边被裁掉，看起来就是
+   「按钮显示不全」。让操作列折到第二行，文件名才能拿到整行宽度。
+   分界点取 560：表格 416 + .wrap 左右 16 + 卡片边框 2 = 450px 才放得下，
+   往上留一档余量，免得正好卡在临界值上来回跳。 */
+@media (max-width: 560px) {
+  thead { display: none; }
+  table, tbody, tr, td { display: block; width: auto; }
+  tr { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  tr:last-child { border-bottom: none; }
+  td { padding: 0; border: none; }
+  .fname { max-width: none; }
+  .actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 10px; }
 }

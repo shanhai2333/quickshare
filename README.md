@@ -1318,7 +1318,7 @@ QS_BASE=http://127.0.0.1:18080 bash e2e.sh
 | `verify-device-identity.mjs` | 12 | 从 `127.0.0.1` / `localhost` / 本机内网 IP 三个不同 origin 各发一条，设备表里只该有一台 |
 | `text-light-shot.mjs` | 35 | 两套主题的对比度（按 WCAG 公式算真实对比度，门槛 AA 的 4.5:1） |
 | `audit-contrast.mjs` | — | 不指定元素，遍历页面里所有带文字的元素，把不达标的全扫出来 |
-| `check-narrow.mjs` | 23 | 390×844 窄视口：`@media (max-width: 720px)` 里的规则会不会把元素挤出视口 |
+| `check-narrow.mjs` | 27 | 390×844 与 768×1024 两个视口：媒体查询里的规则会不会把元素挤出视口，或撑宽后被 `.card` 的 `overflow:hidden` 裁掉（后者不产生横向滚动条，只看 `scrollWidth` 会漏判） |
 | `verify-link-qr.mjs` | 24 | 悬停出二维码、点复制、`navigator.clipboard` 缺失时走 `execCommand` 降级、深色下二维码仍白底 |
 | `verify-sse-ui.mjs` | 8 | 远端改动自动刷新并弹提示、**本机改动不弹** |
 | `xss.mjs` | 9 | 上传的 HTML 被当纯文本对待（`contentType=text/plain`、源码可见、脚本没跑），带脚本的 SVG 仍能内联预览但脚本被 CSP 掐断 |
