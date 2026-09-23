@@ -767,6 +767,39 @@ func TestPruneDevicesSettingRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPreviewAutoplaySettingRoundTrip(t *testing.T) {
+	s := newTextTestServer(t)
+	h := s.Handler()
+	read := func() bool {
+		t.Helper()
+		var out map[string]any
+		rec := doJSON(t, h, http.MethodGet, "/api/settings", "")
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("解析设置失败: %v", err)
+		}
+		v, ok := out["previewAutoplay"].(bool)
+		if !ok {
+			t.Fatalf("previewAutoplay 不是布尔值: %#v", out["previewAutoplay"])
+		}
+		return v
+	}
+	if read() {
+		t.Fatal("预览自动播放默认应当关闭")
+	}
+	if rec := doJSON(t, h, http.MethodPut, "/api/settings", `{"previewAutoplay":true}`); rec.Code != http.StatusOK {
+		t.Fatalf("开启自动播放状态码 = %d（%s）", rec.Code, rec.Body.String())
+	}
+	if !read() {
+		t.Fatal("开启后读取应当为 true")
+	}
+	if rec := doJSON(t, h, http.MethodPut, "/api/settings", `{"previewAutoplay":false}`); rec.Code != http.StatusOK {
+		t.Fatalf("关闭自动播放状态码 = %d（%s）", rec.Code, rec.Body.String())
+	}
+	if read() {
+		t.Fatal("关闭后读取应当为 false")
+	}
+}
+
 func TestChunkSizeSettingRoundTrip(t *testing.T) {
 	s := newTextTestServer(t)
 	h := s.Handler()

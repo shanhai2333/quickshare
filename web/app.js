@@ -434,11 +434,10 @@ function renderPreview() {
       stage.innerHTML = `<img src="${url}" alt="${esc(f.name)}">`;
       break;
     case 'video':
-      // 不写 autoplay：浏览器本来就拦，而且翻到一个视频就自己响起来很烦
-      stage.innerHTML = `<video src="${url}" controls playsinline preload="metadata"></video>`;
+      stage.innerHTML = `<video src="${url}" controls playsinline preload="metadata"${QSSettings.settings.previewAutoplay ? ' autoplay' : ''}></video>`;
       break;
     case 'audio':
-      stage.innerHTML = `<div class="preview-audio"><audio src="${url}" controls preload="metadata"></audio></div>`;
+      stage.innerHTML = `<div class="preview-audio"><audio src="${url}" controls preload="metadata"${QSSettings.settings.previewAutoplay ? ' autoplay' : ''}></audio></div>`;
       break;
     case 'pdf':
       // 交给浏览器自己的 PDF 阅读器（iframe 里跑的就是它），缩放/翻页都不用我们做
@@ -1249,6 +1248,7 @@ QSSettings.apply({
   opacity: { topbar: 85, upload: 85, files: 85 },
   pruneDevices: false,
   chunkSize: 8 * 1024 * 1024,
+  previewAutoplay: false,
 });
 
 bind();

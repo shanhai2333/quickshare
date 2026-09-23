@@ -155,6 +155,8 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		PruneDevices *bool `json:"pruneDevices"`
 		// 分片大小只影响新建上传任务；进行中的任务继续使用它自己记录的大小。
 		ChunkSize *int `json:"chunkSize"`
+		// 预览自动播放默认关闭；开启后只对视频和音频生效。
+		PreviewAutoplay *bool `json:"previewAutoplay"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败")
@@ -229,6 +231,9 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		updates[store.SettingChunkSize] = strconv.Itoa(*in.ChunkSize)
 	}
+	if in.PreviewAutoplay != nil {
+		updates[store.SettingPreviewAutoplay] = boolSetting(*in.PreviewAutoplay)
+	}
 
 	// 先全部校验完再落库，避免"一半写进去了、一半被拒"这种半截状态
 	for k, v := range updates {
@@ -279,8 +284,9 @@ func (s *Server) settingsDTO(kv map[string]string) map[string]any {
 			"value": codeTTLValueOr(kv),
 			"unit":  ttlUnitOr(kv[store.SettingCodeTTLUnit], "minute"),
 		},
-		"pruneDevices": kv[store.SettingPruneDevices] == "1",
-		"chunkSize":    s.chunkSize(),
+		"pruneDevices":    kv[store.SettingPruneDevices] == "1",
+		"chunkSize":       s.chunkSize(),
+		"previewAutoplay": kv[store.SettingPreviewAutoplay] == "1",
 	}
 	if _, err := os.Stat(s.be().bgPath()); err == nil {
 		out["background"] = map[string]any{

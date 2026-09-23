@@ -269,6 +269,15 @@ const QSSettings = (() => {
       </div>
 
       <div class="field" data-page="files">
+        <div class="field-label">预览自动播放</div>
+        <div class="seg" id="previewAutoplaySeg">
+          <button class="seg-item" data-preview-autoplay="0">关闭</button>
+          <button class="seg-item" data-preview-autoplay="1">开启</button>
+        </div>
+        <div class="hint">开启后打开视频或音频预览时会自动播放；浏览器或 iPhone 的系统规则仍可能要求用户先点一下播放。</div>
+      </div>
+
+      <div class="field" data-page="files">
         <div class="field-label">上传分片大小</div>
         <div class="path-row">
           <input type="number" id="chunkSizeValue" min="1" max="64" step="1" value="8" aria-label="上传分片大小">
@@ -339,6 +348,7 @@ const QSSettings = (() => {
     fileTTL: { value: 0, unit: 'day' },
     pruneDevices: false,
     chunkSize: 8 * 1024 * 1024,
+    previewAutoplay: false,
   };
 
   let storage = null;
@@ -472,6 +482,10 @@ const QSSettings = (() => {
 
     const chunk = Number(s.chunkSize) || 8 * 1024 * 1024;
     $('chunkSizeValue').value = Math.round(chunk / (1024 * 1024));
+    const autoplay = !!s.previewAutoplay;
+    document.querySelectorAll('#previewAutoplaySeg .seg-item').forEach((b) => {
+      b.classList.toggle('active', b.getAttribute('data-preview-autoplay') === (autoplay ? '1' : '0'));
+    });
 
     // 设备记录：跟 #themeSeg 一样是分段控件，省得为一个布尔开关另写一套
     // switch 组件、再补一遍两套主题的对比度
@@ -832,6 +846,10 @@ const QSSettings = (() => {
     $('chunkSizeSave').addEventListener('click', saveChunkSize);
     $('chunkSizeValue').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') saveChunkSize();
+    });
+    $('previewAutoplaySeg').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-preview-autoplay]');
+      if (btn) save({ previewAutoplay: btn.getAttribute('data-preview-autoplay') === '1' });
     });
 
     // 三档保留时长，同一个套路
