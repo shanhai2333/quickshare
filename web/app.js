@@ -732,11 +732,13 @@ async function uploadFile(item) {
     }
 
     let done = received.size;
+    const activeBytes = new Map();
     const report = (force) => {
       const now = Date.now();
       if (!force && now - lastTick < 120) return;
       lastTick = now;
-      const sent = Math.min(done * chunkSize, file.size);
+      const inFlight = [...activeBytes.values()].reduce((sum, n) => sum + n, 0);
+      const sent = Math.min(done * chunkSize + inFlight, file.size);
       const pct = file.size ? (sent / file.size) * 100 : 100;
       bar.style.width = pct.toFixed(1) + '%';
       const secs = (now - t0) / 1000;
@@ -751,9 +753,10 @@ async function uploadFile(item) {
     }
 
     // iOS Chrome 实际走的是 WebKit。它对多个并行的大 Blob 上传比桌面 Chrome
-    // 更容易把某一条 fetch 卡在 pending：页面看起来还活着，但 Promise 永远不回。
+    // 更容易把某一条请求卡在 pending：页面看起来还活着，但 Promise 永远不回。
     // 同一个分片是幂等覆盖，所以这里宁可在 iOS 上串行，也不要让三个卡住的请求
-    // 一起占住连接；非 iOS 继续保留并行上传速度。
+    // 一起占住连接；非 iOS 继续保留并行上传速度。activeBytes 还会把当前分片的
+    // XHR 上传进度算进总进度，避免一个 8 MiB 分片传输期间一直显示旧的 0%。
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
       || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     const concurrency = isIOS ? 1 : 3;
@@ -763,7 +766,12 @@ async function uploadFile(item) {
         const start = idx * chunkSize;
         if (item.cancelled) return;
         const blob = file.slice(start, Math.min(start + chunkSize, file.size));
-        await putChunk(uploadId, idx, blob, item);
+        activeBytes.set(idx, 0);
+        await putChunk(uploadId, idx, blob, item, (loaded) => {
+          activeBytes.set(idx, loaded);
+          report(false);
+        });
+        activeBytes.delete(idx);
         done++;
         report(false);
       }
@@ -793,7 +801,7 @@ async function uploadFile(item) {
   }
 }
 
-function putChunk(uploadId, idx, blob, item) {
+function putChunk(uploadId, idx, blob, item, onProgress = () => {}) {
   const headers = {};
   if (state.token) headers['X-Admin-Token'] = state.token;
 
@@ -831,6 +839,21 @@ function putChunk(uploadId, idx, blob, item) {
       return;
     }
     for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded);
+    };
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState !== XMLHttpRequest.DONE || settled) return;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        finish(resolve);
+        return;
+      }
+      let msg = `分片 ${idx} 上传失败`;
+      try { msg = JSON.parse(xhr.responseText).error || msg; } catch (_) { /* 忽略 */ }
+      const err = new Error(msg);
+      err.retryable = xhr.status === 408 || xhr.status === 429 || xhr.status >= 500;
+      finish(reject, err);
+    };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         finish(resolve);
