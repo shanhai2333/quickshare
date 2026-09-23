@@ -73,7 +73,7 @@ function toast(msg, kind = '') {
 
 /* ------------------------------------------------------------ 请求 */
 
-async function api(method, path, body) {
+async function api(method, path, body, signal) {
   const headers = {};
   if (state.token) headers['X-Admin-Token'] = state.token;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -82,6 +82,7 @@ async function api(method, path, body) {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
 
   if (res.status === 401) {
@@ -593,11 +594,22 @@ function addToQueue(file) {
     <div class="qitem-top">
       <span class="qitem-name">${esc(file.name)}</span>
       <span class="qitem-meta">等待中</span>
+      <button class="btn btn-sm qitem-cancel" type="button" title="取消上传">取消</button>
     </div>
     <div class="bar"><i></i></div>`;
   $('queue').appendChild(el);
 
-  const item = { file, el, meta: el.querySelector('.qitem-meta'), bar: el.querySelector('.bar > i') };
+  const item = {
+    file,
+    el,
+    meta: el.querySelector('.qitem-meta'),
+    bar: el.querySelector('.bar > i'),
+    cancelBtn: el.querySelector('.qitem-cancel'),
+    abortControllers: new Set(),
+    donePromise: null,
+    cancelled: false,
+  };
+  item.cancelBtn.addEventListener('click', () => cancelUpload(item));
   queue.push(item);
   runQueue();
 }
@@ -636,12 +648,51 @@ let running = 0;
 
 function runQueue() {
   while (running < 2) {
-    const item = queue.find((i) => !i.started);
+    const item = queue.find((i) => !i.started && !i.cancelled);
     if (!item) return;
     item.started = true;
     running++;
-    uploadFile(item).finally(() => { running--; runQueue(); });
+    item.donePromise = uploadFile(item);
+    item.donePromise.then(
+      () => { running--; runQueue(); },
+      () => { running--; runQueue(); },
+    );
   }
+}
+
+async function cancelUpload(item) {
+  if (item.cancelled) return;
+  item.cancelled = true;
+  for (const controller of item.abortControllers) controller.abort();
+  if (!item.started) {
+    item.el.remove();
+    const i = queue.indexOf(item);
+    if (i >= 0) queue.splice(i, 1);
+    runQueue();
+    return;
+  }
+  item.cancelBtn.disabled = true;
+  item.cancelBtn.textContent = '取消中…';
+  item.meta.textContent = '正在取消…';
+  try {
+    if (item.donePromise) await item.donePromise.catch(() => {});
+    if (item.uploadId) await api('DELETE', `/api/upload/${item.uploadId}`);
+  } catch (e) {
+    // 网络已经断开时服务端仍会由后台 TTL 清理，保留错误提示比假装删除成功好。
+    item.cancelled = false;
+    item.cancelBtn.disabled = false;
+    item.cancelBtn.textContent = '取消';
+    item.meta.textContent = `取消失败：${e.message}`;
+    return;
+  }
+  item.el.classList.add('done');
+  item.meta.textContent = '已取消';
+  item.cancelBtn.remove();
+  setTimeout(() => {
+    item.el.remove();
+    const i = queue.indexOf(item);
+    if (i >= 0) queue.splice(i, 1);
+  }, 900);
 }
 
 async function uploadFile(item) {
@@ -657,11 +708,23 @@ async function uploadFile(item) {
   let lastTick = 0;
 
   try {
-    const init = await api('POST', '/api/upload/init', {
-      name: file.name, size: file.size, mime: file.type || '',
-    });
+    const initController = new AbortController();
+    item.abortControllers.add(initController);
+    let init;
+    try {
+      init = await api('POST', '/api/upload/init', {
+        name: file.name, size: file.size, mime: file.type || '',
+      }, initController.signal);
+    } finally {
+      item.abortControllers.delete(initController);
+    }
 
     const { uploadId, chunkSize, totalChunks } = init;
+    item.uploadId = uploadId;
+    if (item.cancelled) {
+      await api('DELETE', `/api/upload/${uploadId}`);
+      return;
+    }
     const received = new Set(init.received || []);
     const pending = [];
     for (let i = 0; i < totalChunks; i++) {
@@ -698,17 +761,20 @@ async function uploadFile(item) {
       while (pending.length) {
         const idx = pending.shift();
         const start = idx * chunkSize;
+        if (item.cancelled) return;
         const blob = file.slice(start, Math.min(start + chunkSize, file.size));
-        await putChunk(uploadId, idx, blob);
+        await putChunk(uploadId, idx, blob, item);
         done++;
         report(false);
       }
     });
     await Promise.all(workers);
+    if (item.cancelled) return;
 
     const result = await api('POST', `/api/upload/${uploadId}/complete`);
     bar.style.width = '100%';
     el.classList.add('done');
+    item.cancelBtn.remove();
     const secs = (Date.now() - t0) / 1000;
     meta.textContent = `完成 · ${fmtSize(result.size)} · 用时 ${secs.toFixed(1)}s`;
     setTimeout(() => {
@@ -721,12 +787,13 @@ async function uploadFile(item) {
     markLocalChange();
     await refreshAll();
   } catch (e) {
+    if (item.cancelled) return;
     el.classList.add('err');
     meta.textContent = e.message || '上传失败';
   }
 }
 
-async function putChunk(uploadId, idx, blob) {
+async function putChunk(uploadId, idx, blob, item) {
   const headers = {};
   if (state.token) headers['X-Admin-Token'] = state.token;
 
@@ -739,6 +806,7 @@ async function putChunk(uploadId, idx, blob) {
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const controller = new AbortController();
+    item.abortControllers.add(controller);
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
       const res = await fetch(`/api/upload/${uploadId}/${idx}`, {
@@ -754,6 +822,7 @@ async function putChunk(uploadId, idx, blob) {
       }
       return;
     } catch (e) {
+      if (item.cancelled) throw e;
       lastError = e.name === 'AbortError'
         ? new Error(`分片 ${idx} 上传超时（第 ${attempt + 1}/${MAX_ATTEMPTS} 次）`)
         : e;
@@ -761,6 +830,7 @@ async function putChunk(uploadId, idx, blob) {
       await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 4000)));
     } finally {
       clearTimeout(timer);
+      item.abortControllers.delete(controller);
     }
   }
 

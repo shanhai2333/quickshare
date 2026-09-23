@@ -304,6 +304,8 @@ a:hover { text-decoration: underline; }
 }
 
 .qitem-meta { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.qitem-cancel { flex: none; }
+.qitem.done .qitem-cancel { display: none; }
 
 .bar {
   height: 4px;
