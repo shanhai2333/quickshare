@@ -1227,8 +1227,9 @@ QSSettings.init({
   },
   onApplied: (s) => {
     if (s && Number(s.chunkSize) > 0) {
-      state.config.chunkSize = Number(s.chunkSize);
-      $('chunkHint').textContent = `分片 ${fmtSize(state.config.chunkSize)}`;
+      if (state.config) state.config.chunkSize = Number(s.chunkSize);
+      const hint = $('chunkHint');
+      if (hint) hint.textContent = `分片 ${fmtSize(Number(s.chunkSize))}`;
     }
   },
 });
