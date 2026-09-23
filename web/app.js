@@ -687,8 +687,14 @@ async function uploadFile(item) {
       toast(`继续上传 ${file.name}（已完成 ${received.size}/${totalChunks} 片）`);
     }
 
-    const CONCURRENCY = 3;
-    const workers = Array.from({ length: Math.min(CONCURRENCY, Math.max(pending.length, 1)) }, async () => {
+    // iOS Chrome 实际走的是 WebKit。它对多个并行的大 Blob 上传比桌面 Chrome
+    // 更容易把某一条 fetch 卡在 pending：页面看起来还活着，但 Promise 永远不回。
+    // 同一个分片是幂等覆盖，所以这里宁可在 iOS 上串行，也不要让三个卡住的请求
+    // 一起占住连接；非 iOS 继续保留并行上传速度。
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const concurrency = isIOS ? 1 : 3;
+    const workers = Array.from({ length: Math.min(concurrency, Math.max(pending.length, 1)) }, async () => {
       while (pending.length) {
         const idx = pending.shift();
         const start = idx * chunkSize;
@@ -723,12 +729,42 @@ async function uploadFile(item) {
 async function putChunk(uploadId, idx, blob) {
   const headers = {};
   if (state.token) headers['X-Admin-Token'] = state.token;
-  const res = await fetch(`/api/upload/${uploadId}/${idx}`, { method: 'PUT', headers, body: blob });
-  if (!res.ok) {
-    let msg = `分片 ${idx} 上传失败`;
-    try { msg = (await res.json()).error || msg; } catch (_) { /* 忽略 */ }
-    throw new Error(msg);
+
+  // iOS WebKit 偶尔会让一个 Blob 上传请求一直 pending，既不 resolve 也不 reject。
+  // 没有超时的话，Promise.all 会永远等这个分片，用户只能刷新页面靠断点续传自救。
+  // 超时后重试是安全的：服务端按 (uploadId, idx) 幂等覆盖同一个分片。
+  const MAX_ATTEMPTS = 3;
+  const TIMEOUT_MS = 45000;
+  let lastError = null;
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch(`/api/upload/${uploadId}/${idx}`, {
+        method: 'PUT', headers, body: blob, signal: controller.signal,
+      });
+      if (!res.ok) {
+        let msg = `分片 ${idx} 上传失败`;
+        try { msg = (await res.json()).error || msg; } catch (_) { /* 忽略 */ }
+        const err = new Error(msg);
+        // 参数错误、鉴权失败等重试没有意义；服务端暂时不可用则交给重试。
+        err.retryable = res.status === 408 || res.status === 429 || res.status >= 500;
+        throw err;
+      }
+      return;
+    } catch (e) {
+      lastError = e.name === 'AbortError'
+        ? new Error(`分片 ${idx} 上传超时（第 ${attempt + 1}/${MAX_ATTEMPTS} 次）`)
+        : e;
+      if (e.retryable === false || attempt + 1 >= MAX_ATTEMPTS) throw lastError;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 4000)));
+    } finally {
+      clearTimeout(timer);
+    }
   }
+
+  throw lastError || new Error(`分片 ${idx} 上传失败`);
 }
 
 /* ------------------------------------------------------------ 实时更新（SSE） */
