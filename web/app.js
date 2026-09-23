@@ -793,48 +793,80 @@ async function uploadFile(item) {
   }
 }
 
-async function putChunk(uploadId, idx, blob, item) {
+function putChunk(uploadId, idx, blob, item) {
   const headers = {};
   if (state.token) headers['X-Admin-Token'] = state.token;
 
-  // iOS WebKit 偶尔会让一个 Blob 上传请求一直 pending，既不 resolve 也不 reject。
-  // 没有超时的话，Promise.all 会永远等这个分片，用户只能刷新页面靠断点续传自救。
-  // 超时后重试是安全的：服务端按 (uploadId, idx) 幂等覆盖同一个分片。
+  // iOS WebKit 对 fetch(Blob) 的 PUT 偶尔会卡在请求尚未发出的阶段：
+  // Docker 日志里连这一片的 PUT 都没有，fetch 却既不 resolve 也不 reject。
+  // 用 XMLHttpRequest 发送原始 Blob，绕开这条 WebKit 的 fetch 路径。
+  // 同一个分片是幂等覆盖，所以超时重试不会破坏断点续传。
   const MAX_ATTEMPTS = 3;
   const TIMEOUT_MS = 45000;
   let lastError = null;
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+  const send = () => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
     const controller = new AbortController();
     item.abortControllers.add(controller);
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    try {
-      const res = await fetch(`/api/upload/${uploadId}/${idx}`, {
-        method: 'PUT', headers, body: blob, signal: controller.signal,
-      });
-      if (!res.ok) {
-        let msg = `分片 ${idx} 上传失败`;
-        try { msg = (await res.json()).error || msg; } catch (_) { /* 忽略 */ }
-        const err = new Error(msg);
-        // 参数错误、鉴权失败等重试没有意义；服务端暂时不可用则交给重试。
-        err.retryable = res.status === 408 || res.status === 429 || res.status >= 500;
-        throw err;
-      }
-      return;
-    } catch (e) {
-      if (item.cancelled) throw e;
-      lastError = e.name === 'AbortError'
-        ? new Error(`分片 ${idx} 上传超时（第 ${attempt + 1}/${MAX_ATTEMPTS} 次）`)
-        : e;
-      if (e.retryable === false || attempt + 1 >= MAX_ATTEMPTS) throw lastError;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 4000)));
-    } finally {
-      clearTimeout(timer);
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      controller.signal.removeEventListener('abort', abort);
       item.abortControllers.delete(controller);
-    }
-  }
+      fn(value);
+    };
+    const abort = () => {
+      xhr.abort();
+      finish(reject, new DOMException('请求已取消', 'AbortError'));
+    };
 
-  throw lastError || new Error(`分片 ${idx} 上传失败`);
+    controller.signal.addEventListener('abort', abort, { once: true });
+    try {
+      xhr.open('PUT', `/api/upload/${uploadId}/${idx}`, true);
+      xhr.timeout = TIMEOUT_MS;
+    } catch (e) {
+      finish(reject, e);
+      return;
+    }
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        finish(resolve);
+        return;
+      }
+      let msg = `分片 ${idx} 上传失败`;
+      try { msg = JSON.parse(xhr.responseText).error || msg; } catch (_) { /* 忽略 */ }
+      const err = new Error(msg);
+      err.retryable = xhr.status === 408 || xhr.status === 429 || xhr.status >= 500;
+      finish(reject, err);
+    };
+    xhr.onerror = () => finish(reject, new Error(`分片 ${idx} 网络错误`));
+    xhr.ontimeout = () => finish(reject, new Error(`分片 ${idx} 上传超时`));
+    xhr.onabort = () => finish(reject, new DOMException('请求已取消', 'AbortError'));
+    xhr.send(blob);
+  });
+
+  return (async () => {
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      try {
+        await send();
+        return;
+      } catch (e) {
+        if (item.cancelled) throw e;
+        lastError = e;
+        if (e.retryable === false || attempt + 1 >= MAX_ATTEMPTS) {
+          if (e.message === `分片 ${idx} 上传超时`) {
+            throw new Error(`${e.message}（第 ${attempt + 1}/${MAX_ATTEMPTS} 次）`);
+          }
+          throw e;
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 4000)));
+      }
+    }
+    throw lastError || new Error(`分片 ${idx} 上传失败`);
+  })();
 }
 
 /* ------------------------------------------------------------ 实时更新（SSE） */
