@@ -40,7 +40,7 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chunkSize := s.cfg.ChunkSize
+	chunkSize := s.chunkSize()
 	total := int((req.Size + chunkSize - 1) / chunkSize)
 	fingerprint := fingerprintOf(name, req.Size)
 

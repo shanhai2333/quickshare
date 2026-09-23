@@ -827,6 +827,7 @@ QSSettings.init({
   getToken: () => state.token,
   onUnauthorized: showAuth,
   onDataDirChanged: refreshAll,
+  // 文件页专属设置不在文本页显示，也不需要文本页处理。
   // 保留时长一改，列表头那句提示要立刻跟着变——它就在这一页上，
   // 等下次刷新才变会很怪。
   //

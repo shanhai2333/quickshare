@@ -1225,6 +1225,12 @@ QSSettings.init({
     markLocalChange();
     await refreshAll();
   },
+  onApplied: (s) => {
+    if (s && Number(s.chunkSize) > 0) {
+      state.config.chunkSize = Number(s.chunkSize);
+      $('chunkHint').textContent = `分片 ${fmtSize(state.config.chunkSize)}`;
+    }
+  },
 });
 
 // 先用默认外观摆好确定的初始态：无背景、滑块禁用。
@@ -1241,6 +1247,7 @@ QSSettings.apply({
   bgBlur: 0,
   opacity: { topbar: 85, upload: 85, files: 85 },
   pruneDevices: false,
+  chunkSize: 8 * 1024 * 1024,
 });
 
 bind();

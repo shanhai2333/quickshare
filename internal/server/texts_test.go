@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -763,6 +764,35 @@ func TestPruneDevicesSettingRoundTrip(t *testing.T) {
 	}
 	if !read() {
 		t.Error("只改主题不该把设备清理开关关掉")
+	}
+}
+
+func TestChunkSizeSettingRoundTrip(t *testing.T) {
+	s := newTextTestServer(t)
+	h := s.Handler()
+	read := func() int64 {
+		t.Helper()
+		var out map[string]any
+		rec := doJSON(t, h, http.MethodGet, "/api/settings", "")
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("解析设置失败: %v", err)
+		}
+		return int64(out["chunkSize"].(float64))
+	}
+	if got := read(); got != 8<<20 {
+		t.Fatalf("默认分片大小 = %d，期望 %d", got, 8<<20)
+	}
+	if rec := doJSON(t, h, http.MethodPut, "/api/settings", `{"chunkSize":4194304}`); rec.Code != http.StatusOK {
+		t.Fatalf("设置 4 MiB 状态码 = %d（%s）", rec.Code, rec.Body.String())
+	}
+	if got := read(); got != 4<<20 {
+		t.Fatalf("设置后分片大小 = %d，期望 %d", got, 4<<20)
+	}
+	for _, n := range []int{0, 65 << 20} {
+		body := fmt.Sprintf(`{"chunkSize":%d}`, n)
+		if rec := doJSON(t, h, http.MethodPut, "/api/settings", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("非法分片大小 %d 状态码 = %d，期望 400", n, rec.Code)
+		}
 	}
 }
 

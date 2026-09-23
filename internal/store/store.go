@@ -93,6 +93,7 @@ const (
 	SettingBgMime    = "background_mime"    // 背景图的 MIME
 	SettingBgVersion = "background_version" // 背景图版本号，用于 URL 破缓存
 	SettingBgBlur    = "background_blur"    // 背景图模糊半径（px）
+	SettingChunkSize = "chunk_size"         // 上传分片大小（字节）
 
 	// 三块区域的不透明度（%）。分开配置是因为顶部栏、上传区、文件列表
 	// 在视觉上是三个独立的面板，用户往往只想去调其中一块。

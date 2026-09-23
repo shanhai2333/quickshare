@@ -31,7 +31,7 @@ import (
 type Config struct {
 	DataDir     string        // 数据根目录（文件本体 + 数据库 + 分片）
 	AdminToken  string        // 管理口令；为空表示内网免鉴权
-	ChunkSize   int64         // 分片大小
+	ChunkSize   int64         // 分片大小（未在设置中覆盖时使用）
 	MaxFileSize int64         // 单文件大小上限，0 表示不限
 	UploadTTL   time.Duration // 未完成上传的保留时长
 
@@ -473,7 +473,7 @@ func (s *Server) adminOK(r *http.Request) bool {
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"needAuth":    s.cfg.AdminToken != "",
-		"chunkSize":   s.cfg.ChunkSize,
+		"chunkSize":   s.chunkSize(),
 		"maxFileSize": s.cfg.MaxFileSize,
 		// 构建时注入的版本号。以前这里写死 "1.0.0"，跟实际编出来的东西
 		// 一点关系都没有——用户报问题时报的版本号是假的，最坑。
@@ -621,6 +621,30 @@ func urlEscape(s string) string {
 		}
 	}
 	return b.String()
+}
+
+const (
+	defaultChunkSize = 8 << 20
+	minChunkSize     = 1 << 20
+	maxChunkSize     = 64 << 20
+)
+
+// chunkSize 读取全局分片大小。设置损坏或读取失败时回退到启动配置，
+// 这样一个脏设置不会让上传接口拿到 0 或负数。
+func (s *Server) chunkSize() int64 {
+	fallback := s.cfg.ChunkSize
+	if fallback < minChunkSize || fallback > maxChunkSize {
+		fallback = defaultChunkSize
+	}
+	kv, err := s.be().st.GetSettings()
+	if err != nil {
+		return fallback
+	}
+	n := int64(intOr(kv[store.SettingChunkSize], int(fallback)))
+	if n < minChunkSize || n > maxChunkSize {
+		return fallback
+	}
+	return n
 }
 
 const hexDigits = "0123456789ABCDEF"

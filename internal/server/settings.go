@@ -153,6 +153,8 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		CodeTTL *ttlInput `json:"codeTTL"`
 		// 设备随消息删除：删文本时顺手把已经没有任何文本的设备记录也删掉。
 		PruneDevices *bool `json:"pruneDevices"`
+		// 分片大小只影响新建上传任务；进行中的任务继续使用它自己记录的大小。
+		ChunkSize *int `json:"chunkSize"`
 	}
 	if err := readJSON(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "请求体解析失败")
@@ -220,6 +222,14 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		updates[store.SettingPruneDevices] = boolSetting(*in.PruneDevices)
 	}
 
+	if in.ChunkSize != nil {
+		if *in.ChunkSize < int(minChunkSize) || *in.ChunkSize > int(maxChunkSize) {
+			writeErr(w, http.StatusBadRequest, "分片大小取值范围是 1 到 64 MiB")
+			return
+		}
+		updates[store.SettingChunkSize] = strconv.Itoa(*in.ChunkSize)
+	}
+
 	// 先全部校验完再落库，避免"一半写进去了、一半被拒"这种半截状态
 	for k, v := range updates {
 		if err := b.st.SetSetting(k, v); err != nil {
@@ -270,6 +280,7 @@ func (s *Server) settingsDTO(kv map[string]string) map[string]any {
 			"unit":  ttlUnitOr(kv[store.SettingCodeTTLUnit], "minute"),
 		},
 		"pruneDevices": kv[store.SettingPruneDevices] == "1",
+		"chunkSize":    s.chunkSize(),
 	}
 	if _, err := os.Stat(s.be().bgPath()); err == nil {
 		out["background"] = map[string]any{

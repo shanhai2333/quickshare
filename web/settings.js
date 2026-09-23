@@ -268,6 +268,16 @@ const QSSettings = (() => {
         <div class="hint">只在显示背景图时生效。调低能让背景透出来，但文字也会变难认。</div>
       </div>
 
+      <div class="field" data-page="files">
+        <div class="field-label">上传分片大小</div>
+        <div class="path-row">
+          <input type="number" id="chunkSizeValue" min="1" max="64" step="1" value="8" aria-label="上传分片大小">
+          <span>MiB</span>
+          <button class="btn btn-sm" id="chunkSizeSave">应用</button>
+        </div>
+        <div class="hint" id="chunkSizeHint">建议 4–16 MiB；iPhone / iPad 或 Wi-Fi 不稳定时建议 1–4 MiB，千兆内网可用 8–16 MiB。分片越大，单片失败时需要重传的数据越多。</div>
+      </div>
+
       ${ttlBlock(TTL_SPECS[0], 'text', '文本保留时间',
         '只影响文本页的文本，不涉及上传的文件。')}
 
@@ -328,6 +338,7 @@ const QSSettings = (() => {
     codeTTL: { value: 10, unit: 'minute' },
     fileTTL: { value: 0, unit: 'day' },
     pruneDevices: false,
+    chunkSize: 8 * 1024 * 1024,
   };
 
   let storage = null;
@@ -459,6 +470,9 @@ const QSSettings = (() => {
       syncTTLHint(spec);
     }
 
+    const chunk = Number(s.chunkSize) || 8 * 1024 * 1024;
+    $('chunkSizeValue').value = Math.round(chunk / (1024 * 1024));
+
     // 设备记录：跟 #themeSeg 一样是分段控件，省得为一个布尔开关另写一套
     // switch 组件、再补一遍两套主题的对比度
     const prune = !!s.pruneDevices;
@@ -484,6 +498,18 @@ const QSSettings = (() => {
 
   // 保存保留时长。数字和单位是一组，所以用「应用」按钮提交，
   // 而不是像滑块那样改完就发——否则改单位的一瞬间会用一个半截的值落库。
+  async function saveChunkSize() {
+    const raw = $('chunkSizeValue').value.trim();
+    const value = raw === '' ? 8 : Number(raw);
+    if (!Number.isInteger(value) || value < 1 || value > 64) {
+      toast('分片大小要填 1 到 64 MiB 之间的整数', 'err');
+      return;
+    }
+    if (await save({ chunkSize: value * 1024 * 1024 })) {
+      toast('分片大小已更新；只影响新的上传任务', 'ok');
+    }
+  }
+
   async function saveTTL(spec) {
     const raw = $(spec.valueId).value.trim();
     const value = raw === '' ? 0 : Number(raw);
@@ -512,12 +538,14 @@ const QSSettings = (() => {
 
     try {
       apply(await api('PUT', '/api/settings', patch));
+      return true;
     } catch (e) {
       toast(e.message, 'err');
       // 回滚到服务端的真实状态，而不是刚才的预览值
       try {
         apply(await fetch('/api/settings').then((r) => r.json()));
       } catch (_) { /* 拉不回来就先这样，下次刷新会纠正 */ }
+      return false;
     }
   }
 
@@ -800,6 +828,10 @@ const QSSettings = (() => {
     $('dataDirSave').addEventListener('click', applyDataDir);
     $('dataDirInput').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') applyDataDir();
+    });
+    $('chunkSizeSave').addEventListener('click', saveChunkSize);
+    $('chunkSizeValue').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') saveChunkSize();
     });
 
     // 三档保留时长，同一个套路
