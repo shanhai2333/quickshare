@@ -818,9 +818,16 @@ function putChunk(uploadId, idx, blob, item, onProgress = () => {}) {
     const controller = new AbortController();
     item.abortControllers.add(controller);
     let settled = false;
+    let statusTimer = null;
+    let statusController = null;
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
+      if (statusTimer !== null) clearTimeout(statusTimer);
+      if (statusController) statusController.abort();
+      // 状态查询确认服务端已经落盘时，原 XHR 可能仍没有触发回调；
+      // 主 Promise 结束后立即收掉它，避免下一片开始时留下悬挂请求。
+      if (fn === resolve && xhr.readyState !== XMLHttpRequest.DONE) xhr.abort();
       controller.signal.removeEventListener('abort', abort);
       item.abortControllers.delete(controller);
       fn(value);
@@ -842,6 +849,31 @@ function putChunk(uploadId, idx, blob, item, onProgress = () => {}) {
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(e.loaded);
     };
+    // XHR 在 iOS 上可能已经收到 200，但回调链没有可靠结束。readyState
+    // 兜底只负责成功响应；readyState 卡住时，继续用轻量 status 查询确认服务端是否已落盘。
+    const pollStatus = async () => {
+      if (settled) return;
+      if (xhr.readyState === XMLHttpRequest.DONE && xhr.status >= 200 && xhr.status < 300) {
+        finish(resolve);
+        return;
+      }
+      statusController = new AbortController();
+      try {
+        const res = await fetch(`/api/upload/${uploadId}/status`, {
+          headers, signal: statusController.signal,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.received) && data.received.includes(idx)) {
+            onProgress(blob.size);
+            finish(resolve);
+            return;
+          }
+        }
+      } catch (_) { /* 主上传仍在进行，查询失败不影响它 */ }
+      if (!settled) statusTimer = setTimeout(pollStatus, 500);
+    };
+    statusTimer = setTimeout(pollStatus, 500);
     xhr.onreadystatechange = () => {
       if (xhr.readyState !== XMLHttpRequest.DONE || settled) return;
       if (xhr.status >= 200 && xhr.status < 300) {
