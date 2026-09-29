@@ -435,7 +435,12 @@ async function bulkDelete() {
     toast('还没有选中任何文本', 'err');
     return;
   }
-  if (!confirm(`确定删除选中的 ${ids.length} 条文本？删了找不回来。`)) return;
+  if (!await QSSettings.confirm({
+    title: '删除选中的文本',
+    message: `确定删除选中的 ${ids.length} 条文本？删除后无法恢复。`,
+    confirmText: `删除 ${ids.length} 条`,
+    danger: true,
+  })) return;
 
   const btn = $('bulkDelete');
   btn.disabled = true;
@@ -511,7 +516,12 @@ async function deleteDevice(id) {
   if (d.isMe) {
     lines.push('', '这是你当前用的这台，下次发文本时它会重新出现在这里。');
   }
-  if (!confirm(lines.join('\n'))) return;
+  if (!await QSSettings.confirm({
+    title: '删除设备记录',
+    message: lines.join('\n'),
+    confirmText: '删除设备',
+    danger: true,
+  })) return;
 
   try {
     await api('DELETE', `/api/devices/${encodeURIComponent(id)}`);
@@ -695,9 +705,9 @@ function bind() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    // 设置面板开着时，Escape 归它管（settings.js 里绑了）。不先让开的话，
-    // 一次按键会同时关掉面板**和**退出多选，用户只按了一下却丢了两层状态。
-    if (QSSettings.isOpen()) return;
+    // 自定义弹窗 / 设置面板开着时，Escape 归共享 UI 层管。不先让开的话，
+    // 一次按键会同时关掉上层弹窗**和**下面的设备面板 / 多选状态。
+    if (QSSettings.dialogOpen() || QSSettings.isOpen()) return;
     if (!$('devOverlay').hidden) { openDev(false); return; }
     if (state.editingId) { state.editingId = null; renderTexts(); return; }
     if (state.selectMode) setSelectMode(false);
@@ -756,7 +766,12 @@ function bind() {
     const delBtn = e.target.closest('[data-del]');
     if (delBtn) {
       const id = delBtn.getAttribute('data-del');
-      if (!confirm('确定删除这条文本？删了找不回来。')) return;
+      if (!await QSSettings.confirm({
+        title: '删除文本',
+        message: '确定删除这条文本？删除后无法恢复。',
+        confirmText: '删除文本',
+        danger: true,
+      })) return;
       try {
         await api('DELETE', `/api/texts/${encodeURIComponent(id)}`);
         if (state.editingId === id) state.editingId = null;

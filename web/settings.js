@@ -333,6 +333,20 @@ const QSSettings = (() => {
   </div>
 </div>
 
+<!-- 全站共用的确认 / 选择弹窗。标记跟设置面板放在同一份共享脚本里，
+     文件页和文本页不会各长出一套。正文只用 textContent 填充，不解释 HTML。 -->
+<div class="dialog-overlay" id="dialogOverlay" hidden>
+  <div class="dialog-card" id="dialogCard" role="dialog" aria-modal="true"
+       aria-labelledby="dialogTitle" aria-describedby="dialogMessage" tabindex="-1">
+    <div class="dialog-icon" id="dialogIcon" aria-hidden="true">!</div>
+    <div class="dialog-copy">
+      <h3 id="dialogTitle"></h3>
+      <div class="dialog-message" id="dialogMessage"></div>
+    </div>
+    <div class="dialog-actions" id="dialogActions"></div>
+  </div>
+</div>
+
 <input type="file" id="bgInput" accept="image/jpeg,image/png,image/webp,image/gif,image/avif" hidden>
 `;
 
@@ -353,6 +367,10 @@ const QSSettings = (() => {
 
   let storage = null;
   let mounted = false;
+
+  // 自定义弹窗同一时刻只显示一个。Promise 的 resolve 留在这里，按钮、遮罩和
+  // Escape 最终都走 closeDialog()，这样不会出现某条关闭路径漏恢复焦点 / 漏解锁滚动。
+  let dialogState = null;
 
   // 页面相关的几个动作由页面注入。默认值是空实现，这样"忘了注入"最多是
   // 少个提示，不会整页炸掉。
@@ -375,6 +393,105 @@ const QSSettings = (() => {
     box.innerHTML = MARKUP;
     while (box.firstChild) document.body.appendChild(box.firstChild);
     mounted = true;
+  }
+
+  // 页面可能同时开着设置面板 / 设备面板 / 预览层。弹窗关闭时不能无条件移除
+  // modal-open，否则底下还开着的那层会突然恢复页面滚动。
+  function syncModalOpen() {
+    const dialogOpen = mounted && !$('dialogOverlay').hidden;
+    const settingsOpen = mounted && !$('overlay').hidden;
+    const otherOpen = [...document.querySelectorAll('.preview, .overlay')]
+      .some((el) => el.id !== 'overlay' && !el.hidden);
+    document.documentElement.classList.toggle('modal-open', dialogOpen || settingsOpen || otherOpen);
+  }
+
+  function dialogOpen() {
+    return mounted && !$('dialogOverlay').hidden;
+  }
+
+  function closeDialog(value) {
+    if (!dialogState) return;
+    const current = dialogState;
+    dialogState = null;
+    $('dialogOverlay').hidden = true;
+    $('dialogActions').innerHTML = '';
+    syncModalOpen();
+    if (current.focus && current.focus.isConnected) current.focus.focus();
+    current.resolve(value);
+  }
+
+  // Promise 风格的通用选择弹窗。actions 里每个 value 都是业务结果；关闭、遮罩、
+  // Escape 才返回 cancelValue。因此存储迁移可以明确区分「迁移并切换」「只切换」
+  // 和「什么都不做」，不会再借浏览器 confirm 的取消按钮表达一项有效操作。
+  function choose(options) {
+    mount();
+    const opts = options || {};
+    const actions = Array.isArray(opts.actions) && opts.actions.length
+      ? opts.actions
+      : [{ value: true, text: '确定', primary: true }, { value: false, text: '取消' }];
+
+    // 理论上业务不会叠着开两个确认框；真发生时也要先收掉上一层，不能留下一个
+    // 永远无法 resolve 的 Promise。
+    if (dialogState) closeDialog(dialogState.cancelValue);
+
+    $('dialogTitle').textContent = opts.title || '请确认';
+    $('dialogMessage').textContent = opts.message || '';
+    $('dialogCard').classList.toggle('danger', !!opts.danger);
+    $('dialogIcon').textContent = opts.danger ? '!' : '?';
+
+    const actionBox = $('dialogActions');
+    actionBox.innerHTML = '';
+    actionBox.classList.toggle('three-actions', actions.length === 3);
+    for (const action of actions) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn dialog-action';
+      if (action.primary) btn.classList.add('btn-primary');
+      if (action.danger) btn.classList.add('btn-danger', 'dialog-danger-action');
+      if (action.focus) btn.dataset.focus = '1';
+      btn.textContent = action.text || '确定';
+      btn.addEventListener('click', () => closeDialog(action.value));
+      actionBox.appendChild(btn);
+    }
+
+    const focusBefore = document.activeElement;
+    $('dialogOverlay').hidden = false;
+    syncModalOpen();
+
+    return new Promise((resolve) => {
+      dialogState = {
+        resolve,
+        cancelValue: Object.prototype.hasOwnProperty.call(opts, 'cancelValue')
+          ? opts.cancelValue : null,
+        focus: focusBefore,
+      };
+      requestAnimationFrame(() => {
+        const preferred = actionBox.querySelector('[data-focus], .btn-primary, .dialog-danger-action')
+          || actionBox.querySelector('button');
+        if (preferred) preferred.focus();
+        else $('dialogCard').focus();
+      });
+    });
+  }
+
+  function confirmDialog(options) {
+    const opts = options || {};
+    return choose({
+      title: opts.title || '请确认',
+      message: opts.message || '',
+      danger: !!opts.danger,
+      cancelValue: false,
+      actions: [
+        { value: false, text: opts.cancelText || '取消' },
+        {
+          value: true,
+          text: opts.confirmText || '确定',
+          primary: !opts.danger,
+          danger: !!opts.danger,
+          focus: true,
+        },
+      ],
+    });
   }
 
   // 显式主题优先；为空（跟随系统）时看系统偏好
@@ -602,7 +719,12 @@ const QSSettings = (() => {
   }
 
   async function clearBackground() {
-    if (!confirm('移除当前背景图？')) return;
+    if (!await confirmDialog({
+      title: '移除背景图',
+      message: '确定移除当前背景图？这个操作不会删除你设备上的原图片。',
+      confirmText: '移除背景',
+      danger: true,
+    })) return;
     try {
       apply(await api('DELETE', '/api/background'));
       toast('背景已移除', 'ok');
@@ -651,12 +773,21 @@ const QSSettings = (() => {
       return;
     }
 
-    // 迁移是有代价的（跨盘时要真拷一遍），所以让用户明确选一次
-    const migrate = confirm(
-      `把文件存储位置切换到：\n${path}\n\n` +
-      '「确定」= 连同现有文件一起迁移过去\n' +
-      '「取消」= 只换目录，新目录从空开始（原文件仍留在旧目录）'
-    );
+    // 迁移是有代价的（跨盘时要真拷一遍），所以让用户明确选一次。
+    // 这里必须是**三个**结果：原生 confirm 只有两个按钮，过去只能把「取消」借来
+    // 表达「只切换」，用户没有真正放弃操作的入口。
+    const choice = await choose({
+      title: '切换文件存储位置',
+      message: `新的存储位置：\n${path}\n\n迁移会复制现有文件；只切换会从空目录开始，原文件仍留在旧目录。`,
+      cancelValue: null,
+      actions: [
+        { value: null, text: '取消' },
+        { value: 'switch', text: '只切换' },
+        { value: 'migrate', text: '迁移并切换', primary: true },
+      ],
+    });
+    if (choice === null) return;
+    const migrate = choice === 'migrate';
 
     const btn = $('dataDirSave');
     btn.disabled = true;
@@ -758,7 +889,7 @@ const QSSettings = (() => {
 
   function open(on) {
     $('overlay').hidden = !on;
-    document.documentElement.classList.toggle('modal-open', on);
+    syncModalOpen();
     if (on) {
       loadStorage();
       loadVersion(2);
@@ -790,6 +921,31 @@ const QSSettings = (() => {
     $('verCheck').addEventListener('click', checkVersion);
     $('overlay').addEventListener('click', (e) => {
       if (e.target === $('overlay')) open(false);
+    });
+    $('dialogOverlay').addEventListener('click', (e) => {
+      if (e.target === $('dialogOverlay') && dialogState) closeDialog(dialogState.cancelValue);
+    });
+    // Escape 先关最上层的自定义弹窗。stopImmediatePropagation 不能省：下面可能还开着
+    // 设置 / 设备 / 预览面板，一次按键只该退一层。
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !dialogOpen() || !dialogState) return;
+      closeDialog(dialogState.cancelValue);
+      e.stopImmediatePropagation();
+    });
+    // 弹窗内把 Tab 焦点圈住，不让键盘焦点落到遮罩下面仍可操作的页面控件上。
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Tab' || !dialogOpen()) return;
+      const buttons = [...$('dialogActions').querySelectorAll('button:not(:disabled)')];
+      if (!buttons.length) return;
+      const first = buttons[0];
+      const last = buttons[buttons.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
     });
     // Escape 关面板。页面自己（文本页）也监听 document 的 Escape，用来退多选 /
     // 取消编辑 / 关设备面板——两层叠着时，一次按键只该关掉最上面那层。
@@ -908,6 +1064,9 @@ const QSSettings = (() => {
     apply,
     open,
     isOpen,
+    dialogOpen,
+    confirm: confirmDialog,
+    choose,
     saveTheme,
     syncThemeUI,
     effectiveTheme,

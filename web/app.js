@@ -1144,7 +1144,12 @@ function bind() {
     const id = btn.getAttribute('data-del');
     const f = state.files.find((x) => x.id === id);
     if (!f) return;
-    if (!confirm(`确定删除「${f.name}」？`)) return;
+    if (!await QSSettings.confirm({
+      title: '删除文件',
+      message: `确定删除「${f.name}」？文件删除后无法恢复。`,
+      confirmText: '删除文件',
+      danger: true,
+    })) return;
 
     try {
       await api('DELETE', `/api/files/${id}`);
@@ -1194,7 +1199,7 @@ function bind() {
   //   ② Esc 要 stopPropagation。设置面板也在 document 上监听 Esc（settings.js，
   //      它先注册所以先跑），不拦住的话一次按键会关两层。
   document.addEventListener('keydown', (e) => {
-    if (!previewOpen()) return;
+    if (!previewOpen() || QSSettings.dialogOpen()) return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
 

@@ -752,6 +752,100 @@ html.modal-open { overflow: hidden; }
   to { opacity: 1; transform: none; }
 }
 
+/* ---------------------------------------------------------- 共用确认弹窗 */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(16, 24, 40, .52);
+  animation: fade-in .14s ease;
+}
+
+.dialog-card {
+  width: min(420px, 100%);
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 0 12px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 20px 56px rgba(16, 24, 40, .3);
+  animation: pop-in .16s ease;
+  outline: none;
+}
+
+.dialog-icon {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.dialog-card.danger .dialog-icon {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.dialog-copy { min-width: 0; }
+.dialog-copy h3 {
+  margin: 1px 0 6px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.dialog-message {
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dialog-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+/* 普通 .btn-danger 是描边式；确认弹窗里的最终破坏性动作需要更明确，但仍只用
+   现有 danger token，浅色 / 深色 / 背景图三种状态会自动跟随。 */
+.dialog-danger-action {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
+:root[data-theme="dark"] .dialog-danger-action { color: #16181d; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .dialog-danger-action { color: #16181d; }
+}
+.dialog-danger-action:hover {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+  filter: brightness(.94);
+}
+:root[data-theme="dark"] .dialog-danger-action:hover { color: #16181d; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .dialog-danger-action:hover { color: #16181d; }
+}
+
 .sheet-head {
   display: flex;
   align-items: center;
@@ -1251,6 +1345,14 @@ input[type="range"]:disabled { opacity: .45; cursor: not-allowed; }
 
 @media (max-width: 720px) {
   .wrap { padding: 16px; }
+  .dialog-overlay { padding: 12px; }
+  .dialog-card { padding: 17px; }
+  .dialog-actions .btn { flex: 1 1 auto; justify-content: center; }
+  .dialog-actions.three-actions .btn { flex-basis: 100%; }
+  .dialog-actions.three-actions .btn-primary { order: -1; }
+  .dialog-actions.three-actions .btn:nth-child(2) { flex-basis: calc(50% - 4px); }
+  .dialog-actions.three-actions .btn:first-child { flex-basis: calc(50% - 4px); }
+  .stats { display: none; }
   .stats { display: none; }
   .col-hide-sm { display: none; }
   .fname { max-width: 200px; }
