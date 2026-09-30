@@ -86,6 +86,11 @@
 
 html, body { height: 100%; }
 
+/* 打开确认框 / 设置面板时会给 html 加 modal-open 并锁住滚动。保留滚动条槽位，
+   否则 Windows 非覆盖式滚动条会在消失的一瞬间让布局可用宽度增加约 15px，
+   居中的内容就会整体向右跳半个滚动条宽度。 */
+html { scrollbar-gutter: stable; }
+
 body {
   margin: 0;
   background: var(--bg);
