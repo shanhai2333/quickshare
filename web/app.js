@@ -167,6 +167,7 @@ const FILE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" s
 const LINK_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`;
 
 const EYE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 12S5.5 5.5 12 5.5 22.5 12 22.5 12 18.5 18.5 12 18.5 1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
+const PREVIEW_PLAY_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4V8z" fill="currentColor" stroke="none"/></svg>`;
 
 // 文件的可分享地址。
 //
@@ -246,8 +247,11 @@ function renderFiles() {
     const share = esc(shareURL(f));
     // 只有服务端标了 preview 的类型才有这枚按钮（Word / PPT 之类不出现，
     // 点了也只是白点一下）。放在最左边：对媒体文件来说它是最常用的动作。
+    const previewIcon = f.preview === 'video' || f.preview === 'audio'
+      ? PREVIEW_PLAY_ICON
+      : EYE_ICON;
     const pv = f.preview
-      ? `<button class="btn btn-sm btn-icon" data-preview="${esc(f.id)}" title="预览">${EYE_ICON}</button>`
+      ? `<button class="btn btn-sm btn-icon" data-preview="${esc(f.id)}" title="预览">${previewIcon}</button>`
       : '';
     return `
     <tr>
